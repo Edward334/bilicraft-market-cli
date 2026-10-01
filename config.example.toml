@@ -1,0 +1,47 @@
+[server]
+host = "play.example.com"
+port = 25565
+protocol = 774
+player_name = "your-minecraft-name"
+auto_connect = false
+
+[market]
+base_url = "https://www.pleasance.icu"
+interval = "15m"
+sync_seconds = 60
+
+[ai]
+enabled = false
+base_url = "https://api.openai.com"
+chat_path = "/v1/chat/completions"
+model = "gpt-4o-mini"
+timeout_seconds = 45
+retries = 2
+automation_interval_seconds = 900
+
+[risk]
+automation_enabled = false
+timezone = "UTC"
+trading_windows = []
+automation_windows = []
+ai_budget = 0.0
+ai_budget_percent = 0.0
+max_single_trade = 0.0
+max_daily_loss = 0.0
+max_daily_trades = 0
+cooldown_seconds = 300
+max_positions = 0
+
+[qq]
+enabled = false
+api_base_url = "https://api.bot.qq.com"
+markdown = false
+targets = []
+
+[web]
+bind = "127.0.0.1:8787"
+
+[paths]
+data_dir = "data"
+secrets_file = "data/secrets.json"
+database_file = "data/bilicraft.sqlite3"

@@ -1,0 +1,46 @@
+[
+  {
+    "command": "/bal",
+    "events": [
+      { "text": "§a余额：1,234.50 元", "raw": "余额：1,234.50 元", "timestamp": 1 }
+    ]
+  },
+  {
+    "command": "/invest portfolio",
+    "events": [
+      { "text": "帕拉伦股市", "raw": "帕拉伦股市", "timestamp": 2 },
+      { "text": "12 · 星环能源", "raw": "12 · 星环能源", "timestamp": 3 },
+      { "text": "股票: 120", "raw": "股票: 120", "timestamp": 4 },
+      { "text": "总价值: 4567.8", "raw": "总价值: 4567.8", "timestamp": 5 }
+    ]
+  },
+  {
+    "command": "/invest company info 12",
+    "events": [
+      { "text": "帕拉伦股市", "raw": "帕拉伦股市", "timestamp": 6 },
+      { "text": "Id: 12", "raw": "Id: 12", "timestamp": 7 },
+      { "text": "星环能源", "raw": "星环能源", "timestamp": 8 },
+      { "text": "状态: 交易中", "raw": "状态: 交易中", "timestamp": 9 },
+      { "text": "价格: 32.14K", "raw": "价格: 32.14K", "timestamp": 10 },
+      { "text": "可用股数: 800", "raw": "可用股数: 800", "timestamp": 11 }
+    ]
+  },
+  {
+    "command": "/invest buy 12 10",
+    "events": [
+      { "text": "§a买入成功：星环能源 10 股", "raw": "买入成功：星环能源 10 股", "timestamp": 12 }
+    ]
+  },
+  {
+    "command": "/invest sell 12 4",
+    "events": [
+      { "text": "§a卖出成功：星环能源 4 股", "raw": "卖出成功：星环能源 4 股", "timestamp": 13 }
+    ]
+  },
+  {
+    "command": "/invest buy 12 999999",
+    "events": [
+      { "text": "资金不足，无法完成买入", "raw": "资金不足，无法完成买入", "timestamp": 14 }
+    ]
+  }
+]

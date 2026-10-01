@@ -1,0 +1,19 @@
+[Unit]
+Description=Bilicraft AI Stock
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/bilicraft-ai-stock
+ExecStart=/opt/bilicraft-ai-stock/target/release/bilicraft-ai-stock --root /opt/bilicraft-ai-stock serve
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/bilicraft-ai-stock/data
+
+[Install]
+WantedBy=multi-user.target

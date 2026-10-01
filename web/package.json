@@ -1,0 +1,23 @@
+{
+  "name": "web",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "node tests/smoke.mjs",
+    "build": "tsc --noEmit && vite build"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@material/material-color-utilities": "^0.4.0",
+    "@material/web": "^2.5.0",
+    "lightweight-charts": "^5.2.1"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vite-plugin-singlefile": "^2.3.3"
+  }
+}

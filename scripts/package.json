@@ -1,0 +1,11 @@
+{
+  "name": "bilicraft-ai-stock-qq-setup",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@tencent-connect/qqbot-connector": "1.2.0"
+  }
+}

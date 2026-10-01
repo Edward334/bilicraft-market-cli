@@ -1,0 +1,19 @@
+pub mod ai;
+pub mod app;
+pub mod auth;
+pub mod cli;
+pub mod config;
+pub mod db;
+pub mod domain;
+pub mod gateway;
+pub mod ledger;
+pub mod market;
+pub mod minecraft;
+pub mod qq;
+pub mod risk;
+pub mod scheduler;
+pub mod server;
+pub mod state;
+pub mod trader;
+
+pub const APP_NAME: &str = "bilicraft-ai-stock";

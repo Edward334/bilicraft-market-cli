@@ -1,0 +1,300 @@
+package com.bilicraft.handheld.stockplugin
+
+import com.bilicraft.handheld.pluginapi.BhChatEvent
+import com.bilicraft.handheld.pluginapi.BhConnectionState
+import com.bilicraft.handheld.pluginapi.BhPluginHost
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
+
+class StockCommandGateway(
+    private val host: BhPluginHost
+) {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val commandMutex = Mutex()
+    private val _money = MutableStateFlow<Double?>(null)
+    val money: StateFlow<Double?> = _money.asStateFlow()
+    private val messageWaiters = mutableListOf<MessageWaiter>()
+
+    init {
+        scope.launch {
+            host.chatEvents.collect(::acceptMessage)
+        }
+    }
+
+    fun isConnected(): Boolean = host.connectionState.value == BhConnectionState.Connected
+
+    suspend fun refreshMoney(): StockCommandResult = commandMutex.withLock {
+        if (!isConnected()) return StockCommandResult.NotConnected()
+        val response = executeAndCollect("/bal", 4_000) { text ->
+            MONEY_REGEX.containsMatchIn(text) || text.contains("余额:") || text.contains("余额：")
+        } ?: return StockCommandResult.Timeout("/bal")
+        val amount = MONEY_REGEX.find(response)?.groupValues?.getOrNull(1)?.replace(",", "")?.toDoubleOrNull()
+            ?: return StockCommandResult.Failure("服务器已响应，但未能解析资金数额")
+        _money.value = amount
+        StockCommandResult.Success("当前资金：$amount 元")
+    }
+
+    suspend fun queryCompanyInfo(serverId: Int): Result<LiveStockInfo> = commandMutex.withLock {
+        if (!isConnected()) return Result.failure(IllegalStateException("请先连接 Minecraft 服务器"))
+        val command = "/invest company info $serverId"
+        val lines = executeWindow(command, timeoutMs = 4_500, settleMs = 800)
+        parseCompanyInfo(lines, serverId)?.let { return Result.success(it) }
+        val reason = lines.lastOrNull { looksLikeFailure(it) } ?: "查询超时或服务器未返回可解析的股票信息"
+        Result.failure(IllegalStateException(reason))
+    }
+
+    suspend fun queryPortfolio(): Result<List<StockHolding>> = commandMutex.withLock {
+        if (!isConnected()) return Result.failure(IllegalStateException("请先连接 Minecraft 服务器"))
+        val command = "/invest portfolio"
+        val lines = executeWindow(command, timeoutMs = 5_500, settleMs = 900)
+        val holdings = parsePortfolio(lines)
+        val failure = lines.lastOrNull { looksLikeFailure(it) }
+        when {
+            lines.any(::looksLikeEmptyPortfolio) -> Result.success(emptyList())
+            failure != null -> Result.failure(IllegalStateException(failure))
+            holdings.isEmpty() && lines.isNotEmpty() -> Result.success(emptyList())
+            lines.isNotEmpty() -> Result.success(holdings)
+            else -> Result.failure(IllegalStateException("查询超时或服务器未返回持股信息"))
+        }
+    }
+
+    suspend fun trade(action: String, serverId: Int, amount: Long): StockCommandResult = commandMutex.withLock {
+        if (!isConnected()) return StockCommandResult.NotConnected()
+        val command = "/invest $action $serverId $amount"
+        val lines = executeWindow(command, timeoutMs = 5_500, settleMs = 900)
+        if (lines.isEmpty()) return StockCommandResult.Timeout(command)
+        val failure = lines.firstOrNull(::looksLikeFailure)
+        if (failure != null) return StockCommandResult.Failure(failure)
+        val success = lines.lastOrNull { looksLikeTradeSuccess(it, action) }
+        if (success != null) {
+            StockCommandResult.Success(success)
+        } else {
+            StockCommandResult.Failure(lines.lastOrNull { it.isNotBlank() } ?: "服务器未返回交易结果")
+        }
+    }
+
+    private suspend fun executeAndCollect(command: String, timeoutMs: Long, predicate: (String) -> Boolean): String? {
+        val deferred = CompletableDeferred<String>()
+        val waiter = MessageWaiter(predicate, deferred)
+        synchronized(messageWaiters) { messageWaiters += waiter }
+        return try {
+            if (!host.sendChat(command)) return null
+            withTimeoutOrNull(timeoutMs) { deferred.await() }
+        } finally {
+            synchronized(messageWaiters) { messageWaiters.remove(waiter) }
+        }
+    }
+
+    private suspend fun executeWindow(command: String, timeoutMs: Long, settleMs: Long): List<String> {
+        val collected = mutableListOf<String>()
+        val waiter = MessageWaiter({ true }, null, collected, commandEventPredicate(command))
+        synchronized(messageWaiters) { messageWaiters += waiter }
+        return try {
+            if (!host.sendChat(command)) return emptyList()
+            delay(COMMAND_GAP_MS)
+            var waited = 0L
+            var lastSize = -1
+            var stableFor = 0L
+            while (waited < timeoutMs) {
+                delay(POLL_MS)
+                waited += POLL_MS
+                val sizeNow = collected.size
+                if (sizeNow > 0 && sizeNow == lastSize) {
+                    stableFor += POLL_MS
+                    if (stableFor >= settleMs) break
+                } else {
+                    stableFor = 0L
+                    lastSize = sizeNow
+                }
+            }
+            collected.toList()
+        } finally {
+            synchronized(messageWaiters) { messageWaiters.remove(waiter) }
+        }
+    }
+
+    private fun acceptMessage(event: BhChatEvent) {
+        val text = normalizeChatText(event.plainText).ifBlank { normalizeChatText(event.rawJson) }
+        if (text.isBlank()) return
+        synchronized(messageWaiters) {
+            messageWaiters.toList().forEach { waiter ->
+                if (waiter.eventPredicate(event) && waiter.predicate(text)) {
+                    waiter.collected?.add(text)
+                    waiter.deferred?.complete(text)
+                }
+            }
+        }
+    }
+
+    private fun commandEventPredicate(command: String): (BhChatEvent) -> Boolean = when {
+        command.startsWith("/invest company info") -> ::isCompanyInfoMessage
+        command.startsWith("/invest portfolio") -> ::isCompanyInfoMessage
+        command.startsWith("/invest buy") || command.startsWith("/invest sell") -> ::isTradeResultMessage
+        else -> ::isStockMarketMessage
+    }
+
+    private fun isStockMarketMessage(event: BhChatEvent): Boolean {
+        val plain = normalizeCompact(event.plainText)
+        val raw = normalizeCompact(event.rawJson)
+        return plain.contains("帕拉伦股市") || raw.contains("帕拉伦股市")
+    }
+
+    private fun isCompanyInfoMessage(event: BhChatEvent): Boolean = event.sender == null
+
+    private fun isTradeResultMessage(event: BhChatEvent): Boolean {
+        val plain = normalizeCompact(event.plainText)
+        val raw = normalizeCompact(event.rawJson)
+        return plain.contains("帕拉伦股市>") || raw.contains("帕拉伦股市>") ||
+            ((plain.contains("帕拉伦股市") || raw.contains("帕拉伦股市")) &&
+                (plain.contains(">") || raw.contains(">")))
+    }
+
+    private fun parseCompanyInfo(lines: List<String>, requestedId: Int): LiveStockInfo? {
+        val normalizedLines = lines
+            .map(::normalizeChatText)
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+        val text = normalizedLines.joinToString("\n")
+        val name = normalizedLines.firstOrNull { line ->
+            line.isNotBlank() && !line.contains("=-=-=-=-") && !line.startsWith("Id:") &&
+                !line.startsWith("状态:") && !line.startsWith("价格:") && !line.startsWith("风险等级:") &&
+                !line.startsWith("可用股数:") && !line.startsWith("历史记录") && !line.startsWith("[") &&
+                !line.matches(Regex("[+-]?\\d+(\\.\\d+)?%")) && !line.contains("帕拉伦股市")
+        } ?: return null
+        val id = ID_REGEX.find(text)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: requestedId
+        val price = parseMarketPrice(text) ?: return null
+        val status = STATUS_REGEX.find(text)?.groupValues?.getOrNull(1)?.trim()
+        val available = AVAILABLE_REGEX.find(text)?.groupValues?.getOrNull(1)?.toLongOrNull()
+        return LiveStockInfo(id, name, price, status, available)
+    }
+
+    private fun parsePortfolio(lines: List<String>): List<StockHolding> {
+        val normalized = lines.map(::normalizeChatText).map(String::trim).filter(String::isNotBlank)
+        val holdings = mutableListOf<StockHolding>()
+        var companyName: String? = null
+        var marketId: Int? = null
+        var shares: Long? = null
+        var totalValue: Double? = null
+
+        fun flush() {
+            val name = companyName
+            val stockCount = shares
+            val value = totalValue
+            if (name != null && stockCount != null && value != null) {
+                holdings += StockHolding(name, stockCount, value, marketId)
+            }
+            companyName = null
+            marketId = null
+            shares = null
+            totalValue = null
+        }
+
+        normalized.forEach { line ->
+            when {
+                line.startsWith("股票:") || line.startsWith("股票：") -> {
+                    shares = SHARES_REGEX.find(line)?.groupValues?.getOrNull(1)?.toLongOrNull()
+                }
+                line.startsWith("总价值:") || line.startsWith("总价值：") -> {
+                    totalValue = TOTAL_VALUE_REGEX.find(line)?.groupValues?.getOrNull(1)?.toDoubleOrNull()
+                    flush()
+                }
+                isPortfolioCompanyName(line) -> {
+                    flush()
+                    val match = PORTFOLIO_COMPANY_REGEX.matchEntire(line)
+                    marketId = match?.groupValues?.getOrNull(1)?.toIntOrNull()
+                    companyName = match?.groupValues?.getOrNull(2)?.trim()?.takeIf(String::isNotBlank) ?: line
+                }
+            }
+        }
+        flush()
+        return holdings
+    }
+
+    private fun isPortfolioCompanyName(line: String): Boolean =
+        !line.contains("帕拉伦股市") && !line.startsWith("股票:") && !line.startsWith("股票：") &&
+            !line.startsWith("总价值:") && !line.startsWith("总价值：") && !line.startsWith("[") &&
+            !line.contains("=-=-=-=-")
+
+    private fun normalizeCompact(text: String): String = normalizeChatText(text).replace(" ", "")
+
+    private fun normalizeChatText(text: String): String = text
+        .replace(FORMAT_CODE_REGEX, "")
+        .replace("\\u00a7", "")
+        .replace("▌", " ")
+        .replace("\\n", "\n")
+        .replace(Regex("[\\t\\r]"), " ")
+        .lineSequence()
+        .map { it.trim().trim('-', '=', '|') }
+        .joinToString("\n")
+        .replace(Regex(" +"), " ")
+        .trim()
+
+    private fun looksLikeFailure(text: String): Boolean = FAILURE_WORDS.any(text::contains)
+
+    private fun looksLikeTradeSuccess(text: String, action: String): Boolean {
+        val compact = normalizeCompact(text)
+        val actionWords = if (action == "buy") BUY_ACTION_WORDS else SELL_ACTION_WORDS
+        return actionWords.any(compact::contains) && TRADE_SUCCESS_WORDS.any(compact::contains)
+    }
+
+    private fun looksLikeEmptyPortfolio(text: String): Boolean {
+        val compact = normalizeCompact(text)
+        return EMPTY_PORTFOLIO_MARKERS.any(compact::contains) ||
+            Regex("(?:总持仓|持股|股票|股票数量|持有数量|持仓数量)[:：]?0股?").containsMatchIn(compact)
+    }
+
+    private data class MessageWaiter(
+        val predicate: (String) -> Boolean,
+        val deferred: CompletableDeferred<String>? = null,
+        val collected: MutableList<String>? = null,
+        val eventPredicate: (BhChatEvent) -> Boolean = { true }
+    )
+
+    companion object {
+        private val MONEY_REGEX = Regex("(?:资金|余额)[:：]?\\s*\\$?([0-9,]+(?:\\.[0-9]+)?)")
+        private val ID_REGEX = Regex("Id[:：]\\s*(\\d+)", RegexOption.IGNORE_CASE)
+        private val PRICE_REGEX = Regex("价格[:：]\\s*([0-9,]+(?:\\.[0-9]+)?)\\s*([KMBT]?)", RegexOption.IGNORE_CASE)
+        private val STATUS_REGEX = Regex("状态[:：]\\s*([^\\n]+)")
+        private val AVAILABLE_REGEX = Regex("可用股数[:：]\\s*(\\d+)")
+        private val SHARES_REGEX = Regex("股票[:：]\\s*(\\d+)")
+        private val TOTAL_VALUE_REGEX = Regex("总价值[:：]\\s*([0-9]+(?:\\.[0-9]+)?)")
+        private val PORTFOLIO_COMPANY_REGEX = Regex("(?:#|Id[:：]?\\s*)?(\\d+)\\s*[·.、:：-]?\\s*(.+)", RegexOption.IGNORE_CASE)
+        private val FORMAT_CODE_REGEX = Regex("§.")
+        private const val COMMAND_GAP_MS = 300L
+        private const val POLL_MS = 100L
+        private val FAILURE_WORDS = listOf("失败", "错误", "不足", "无法", "不存在", "无效", "禁止", "没有", "超出")
+        private val BUY_ACTION_WORDS = listOf("买入", "购买")
+        private val SELL_ACTION_WORDS = listOf("卖出", "出售", "售出")
+        private val TRADE_SUCCESS_WORDS = listOf("成功", "已买入", "已购买", "已卖出", "已出售", "已售出")
+        private val EMPTY_PORTFOLIO_MARKERS = listOf(
+            "没有持股",
+            "暂无持股",
+            "未持有股票",
+            "当前没有股票",
+            "没有任何股票"
+        )
+
+        internal fun parseMarketPrice(text: String): Double? {
+            val match = PRICE_REGEX.find(text) ?: return null
+            val number = match.groupValues[1].replace(",", "").toDoubleOrNull() ?: return null
+            val multiplier = when (match.groupValues[2].uppercase()) {
+                "K" -> 1_000.0
+                "M" -> 1_000_000.0
+                "B" -> 1_000_000_000.0
+                "T" -> 1_000_000_000_000.0
+                else -> 1.0
+            }
+            return (number * multiplier).takeIf { it.isFinite() }
+        }
+    }
+}
