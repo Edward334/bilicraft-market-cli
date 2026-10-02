@@ -458,8 +458,12 @@ async fn handle_packet(
                 write_varint(0x01, &mut response);
                 write_byte_array(&encrypted_secret, &mut response)?;
                 write_byte_array(&encrypted_token, &mut response)?;
-                transport.write_raw_packet(stream, &response).await?;
-                transport.cipher = Some(Cfb8::new(&secret));
+                // Set Compression is already active here. The Kotlin/Netty reference writes
+                // Encryption Response through the normal outbound pipeline, so it is compressed
+                // but remains unencrypted until the CFB8 handlers are installed afterwards.
+                transport.write_packet(stream, &response).await?;
+                transport.encrypt_cipher = Some(Cfb8::new(&secret));
+                transport.decrypt_cipher = Some(Cfb8::new(&secret));
             }
             0x02 => {
                 let _ = read_uuid(&mut cursor)?;
@@ -609,10 +613,9 @@ async fn join_server(access_token: &str, uuid: &str, server_hash: &str) -> Resul
         .json(&serde_json::json!({ "accessToken": access_token, "selectedProfile": profile, "serverId": server_hash }))
         .send().await.context("Minecraft session join request")?;
     if !response.status().is_success() {
-        bail!(
-            "Minecraft session join rejected with HTTP {}",
-            response.status()
-        )
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        bail!("Minecraft session join rejected with HTTP {status}: {body}")
     }
     Ok(())
 }
@@ -682,7 +685,8 @@ fn hex_lower(bytes: &[u8]) -> String {
 #[derive(Debug, Default)]
 struct Transport {
     compression: Option<i32>,
-    cipher: Option<Cfb8>,
+    encrypt_cipher: Option<Cfb8>,
+    decrypt_cipher: Option<Cfb8>,
 }
 
 impl Transport {
@@ -766,14 +770,14 @@ impl Transport {
 
     async fn read_exact(&mut self, stream: &mut TcpStream, data: &mut [u8]) -> Result<()> {
         stream.read_exact(data).await?;
-        if let Some(cipher) = &mut self.cipher {
+        if let Some(cipher) = &mut self.decrypt_cipher {
             cipher.decrypt(data);
         }
         Ok(())
     }
 
     async fn write_all(&mut self, stream: &mut TcpStream, data: &mut [u8]) -> Result<()> {
-        if let Some(cipher) = &mut self.cipher {
+        if let Some(cipher) = &mut self.encrypt_cipher {
             cipher.encrypt(data);
         }
         stream.write_all(data).await?;

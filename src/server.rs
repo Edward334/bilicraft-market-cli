@@ -130,7 +130,10 @@ async fn portfolio(State(s): State<AppState>) -> Result<Json<serde_json::Value>,
     let session = current_session(&s)?;
     let gateway = StockCommandGateway::new(std::sync::Arc::new(session));
     let balance = gateway.balance().await.map_err(ApiError::from)?;
-    let holdings = gateway.portfolio().await.map_err(ApiError::from)?;
+    let holdings = enrich_holding_ids(
+        gateway.portfolio().await.map_err(ApiError::from)?,
+        &s.market.companies().await.map_err(ApiError::from)?,
+    );
     let metrics =
         s.db.lock()
             .holding_metrics(&holdings)
@@ -185,15 +188,28 @@ async fn trade(
     let session = current_session(&s)?;
     let gateway = StockCommandGateway::new(std::sync::Arc::new(session));
     let balance = gateway.balance().await.map_err(ApiError::from)?;
-    let holdings = gateway.portfolio().await.map_err(ApiError::from)?;
-    let company = s
-        .market
-        .companies()
-        .await
-        .map_err(ApiError::from)?
+    let companies = s.market.companies().await.map_err(ApiError::from)?;
+    let holdings = enrich_holding_ids(
+        gateway.portfolio().await.map_err(ApiError::from)?,
+        &companies,
+    );
+    let company = companies
         .into_iter()
-        .find(|c| c.id == req.company_id)
+        .find(|c| c.id == req.company_id || c.market_id == Some(req.company_id))
         .ok_or_else(|| ApiError::bad("company not found"))?;
+    let server_company_id = company.market_id.unwrap_or(company.id);
+    let live = gateway
+        .company_info(server_company_id)
+        .await
+        .map_err(ApiError::from)?;
+    let mut company = company;
+    company.latest_price = Some(live.price);
+    company.status = live.status;
+    company.available_shares = live.available_shares;
+    let effective_request = TradeRequest {
+        company_id: server_company_id,
+        ..req.clone()
+    };
     let metrics =
         s.db.lock()
             .holding_metrics(&holdings)
@@ -227,7 +243,7 @@ async fn trade(
         now: Utc::now(),
         portfolio: &portfolio,
         company: &company,
-        request: &req,
+        request: &effective_request,
         daily_trades,
         daily_loss,
         last_trade_at,
@@ -243,13 +259,13 @@ async fn trade(
         TradeAction::Sell => "sell",
         _ => return Err(ApiError::bad("manual trade action must be buy or sell")),
     };
-    let result = gateway.trade(action, req.company_id, req.shares).await;
+    let result = gateway.trade(action, server_company_id, req.shares).await;
     match result {
         Ok(message) => {
             if action == "buy" {
                 s.db.lock()
                     .record_buy(
-                        req.company_id,
+                        server_company_id,
                         &company.name,
                         req.shares,
                         company.latest_price.unwrap_or(0.0),
@@ -257,13 +273,13 @@ async fn trade(
                     .map_err(ApiError::from)?;
             } else {
                 s.db.lock()
-                    .record_sell(req.company_id, req.shares, false)
+                    .record_sell(server_company_id, req.shares, live.price, false)
                     .map_err(ApiError::from)?;
             }
             s.db.lock()
                 .audit("trade", &req.source, "success", &message)
                 .map_err(ApiError::from)?;
-            s.emit("trade",&message,serde_json::json!({"company_id":req.company_id,"action":action,"shares":req.shares}));
+            s.emit("trade",&message,serde_json::json!({"company_id":server_company_id,"market_api_id":company.id,"action":action,"shares":req.shares}));
             Ok(Json(
                 serde_json::json!({"status":"confirmed","message":message}),
             ))
@@ -294,8 +310,11 @@ async fn ai_run(
     let session = current_session(&s)?;
     let gateway = StockCommandGateway::new(std::sync::Arc::new(session));
     let balance = gateway.balance().await.map_err(ApiError::from)?;
-    let holdings = gateway.portfolio().await.map_err(ApiError::from)?;
     let companies = s.market.companies().await.map_err(ApiError::from)?;
+    let holdings = enrich_holding_ids(
+        gateway.portfolio().await.map_err(ApiError::from)?,
+        &companies,
+    );
     let metrics =
         s.db.lock()
             .holding_metrics(&holdings)
@@ -338,8 +357,17 @@ async fn ai_run(
         .ok_or_else(|| ApiError::bad("AI decision missing company_id"))?;
     let company = companies
         .into_iter()
-        .find(|c| c.id == id)
+        .find(|c| c.id == id || c.market_id == Some(id))
         .ok_or_else(|| ApiError::bad("AI company not found"))?;
+    let server_company_id = company.market_id.unwrap_or(company.id);
+    let live = gateway
+        .company_info(server_company_id)
+        .await
+        .map_err(ApiError::from)?;
+    let mut company = company;
+    company.latest_price = Some(live.price);
+    company.status = live.status;
+    company.available_shares = live.available_shares;
     let shares = decision
         .shares
         .ok_or_else(|| ApiError::bad("AI decision missing shares"))?;
@@ -352,7 +380,7 @@ async fn ai_run(
     }
     let request = TradeRequest {
         action: decision.action,
-        company_id: id,
+        company_id: server_company_id,
         shares,
         source: "ai".into(),
         reason: Some(decision.reason.clone()),
@@ -385,13 +413,13 @@ async fn ai_run(
         "sell"
     };
     let message = gateway
-        .trade(action, id, shares)
+        .trade(action, server_company_id, shares)
         .await
         .map_err(ApiError::from)?;
     if action == "buy" {
         s.db.lock()
             .record_buy(
-                id,
+                server_company_id,
                 &company.name,
                 shares,
                 company.latest_price.unwrap_or(0.0),
@@ -399,7 +427,7 @@ async fn ai_run(
             .map_err(ApiError::from)?
     } else {
         s.db.lock()
-            .record_sell(id, shares, false)
+            .record_sell(server_company_id, shares, live.price, false)
             .map_err(ApiError::from)?
     };
     s.db.lock()
@@ -416,7 +444,7 @@ async fn ai_run(
             serde_json::json!({}),
         );
     }
-    s.emit("ai_trade",&message,serde_json::json!({"company_id":id,"action":action,"shares":shares,"reason":decision.reason}));
+    s.emit("ai_trade",&message,serde_json::json!({"company_id":server_company_id,"market_api_id":company.id,"action":action,"shares":shares,"reason":decision.reason}));
     Ok(Json(
         serde_json::json!({"status":"confirmed","decision":decision,"message":message}),
     ))
@@ -644,6 +672,28 @@ async fn disconnect(State(s): State<AppState>) -> Result<Json<serde_json::Value>
     *s.minecraft_state.write() = ConnectionState::Disconnected;
     Ok(Json(serde_json::json!({"status":"disconnected"})))
 }
+fn enrich_holding_ids(
+    holdings: Vec<StockHolding>,
+    companies: &[crate::domain::StockCompany],
+) -> Vec<StockHolding> {
+    holdings
+        .into_iter()
+        .map(|holding| {
+            if holding.market_id.is_some() {
+                return holding;
+            }
+            let market_id = companies
+                .iter()
+                .find(|company| company.name == holding.company_name)
+                .and_then(|company| company.market_id.or(Some(company.id)));
+            StockHolding {
+                market_id,
+                ..holding
+            }
+        })
+        .collect()
+}
+
 fn current_session(s: &AppState) -> Result<SessionHandle, ApiError> {
     s.minecraft
         .read()

@@ -206,11 +206,21 @@ pub fn parse_portfolio(lines: &[ChatEvent]) -> Result<Vec<StockHolding>> {
                 })
             }
         } else if !l.contains("帕拉伦股市") && !l.contains("=-=-=-=-") && !l.starts_with('[') {
-            let m = regex::Regex::new(r"(?:#|Id[:：]?\s*)?(\d+)\s*[·.、:：-]?\s*(.+)")
-                .unwrap()
-                .captures(&l);
-            id = m.as_ref().and_then(|c| c[1].parse().ok());
-            name = Some(m.map(|c| c[2].trim().to_owned()).unwrap_or(l));
+            let indexed =
+                regex::Regex::new(r"^(?:(?:#|Id[:：]?\s*)?(-?\d+)\s*[·.、:：-]\s*)?(.+)$")
+                    .unwrap()
+                    .captures(&l);
+            if let Some(captures) = indexed {
+                id = captures
+                    .get(1)
+                    .and_then(|value| value.as_str().parse().ok());
+                name = captures
+                    .get(2)
+                    .map(|value| value.as_str().trim().to_owned());
+            } else {
+                id = None;
+                name = Some(l.clone());
+            }
         }
     }
     Ok(out)
@@ -260,6 +270,18 @@ mod tests {
     #[test]
     fn parses_price_units() {
         assert_eq!(parse_price("价格: 1.2M"), Some(1_200_000.0))
+    }
+    #[test]
+    fn parses_portfolio_zero_server_id() {
+        let holdings = parse_portfolio(&[
+            e("帕拉伦股市"),
+            e("0 · 帕拉伦联合储蓄"),
+            e("股票: 1"),
+            e("总价值: 61.84"),
+        ])
+        .unwrap();
+        assert_eq!(holdings[0].market_id, Some(0));
+        assert_eq!(holdings[0].shares, 1);
     }
     #[test]
     fn parses_trade_failure() {

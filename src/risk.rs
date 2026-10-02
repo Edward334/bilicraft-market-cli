@@ -42,13 +42,14 @@ pub fn validate(c: RiskContext<'_>) -> Result<()> {
             return Err(anyhow!("company is not tradable: {status}"));
         }
     }
+    let server_company_id = c.company.market_id.unwrap_or(c.company.id);
     if r.max_positions > 0
         && c.request.action == TradeAction::Buy
         && !c
             .portfolio
             .holdings
             .iter()
-            .any(|h| h.market_id == Some(c.company.id))
+            .any(|h| h.market_id == Some(server_company_id))
         && c.portfolio.holdings.len() as u32 >= r.max_positions
     {
         return Err(anyhow!("maximum positions reached"));
@@ -73,7 +74,7 @@ pub fn validate(c: RiskContext<'_>) -> Result<()> {
             .portfolio
             .holdings
             .iter()
-            .find(|h| h.market_id == Some(c.company.id))
+            .find(|h| h.market_id == Some(server_company_id))
             .map(|h| h.shares)
             .unwrap_or(0);
         if c.request.shares > held {

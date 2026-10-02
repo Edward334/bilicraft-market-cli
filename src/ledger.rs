@@ -57,7 +57,16 @@ impl Database {
         self.conn.execute("INSERT INTO purchase_records(company_id,company_name,shares,total_cost) VALUES(?1,?2,?3,?4) ON CONFLICT(company_id) DO UPDATE SET company_name=excluded.company_name,shares=shares+excluded.shares,total_cost=total_cost+excluded.total_cost",params![company_id,name,shares,price*shares as f64])?;
         Ok(())
     }
-    pub fn record_sell(&self, company_id: i64, shares: i64, fully_sold: bool) -> Result<()> {
+    pub fn record_sell(
+        &self,
+        company_id: i64,
+        shares: i64,
+        sell_price: f64,
+        fully_sold: bool,
+    ) -> Result<()> {
+        if shares <= 0 || !sell_price.is_finite() || sell_price < 0.0 {
+            return Ok(());
+        }
         let current = self
             .conn
             .query_row(
@@ -67,6 +76,14 @@ impl Database {
             )
             .optional()?;
         if let Some((held, cost)) = current {
+            if held <= 0 {
+                return Ok(());
+            }
+            let sold = if fully_sold { held } else { shares.min(held) };
+            let average_cost = cost / held as f64;
+            let realized = (sell_price - average_cost) * sold as f64;
+            let previous = self.realized_pnl()?;
+            self.set_realized_pnl(previous + realized)?;
             let remain = if fully_sold {
                 0
             } else {
@@ -151,4 +168,25 @@ impl Database {
         Ok(holdings.iter().map(|h|{let r=records.iter().find(|x|x.company_id==h.market_id.unwrap_or(-1));let cost=r.map(|x|x.total_cost).unwrap_or(0.0);let pnl=h.total_value-cost;serde_json::json!({"company_name":h.company_name,"shares":h.shares,"total_value":h.total_value,"market_id":h.market_id,"cost":cost,"pnl":pnl,"pnl_pct":if cost>0.0{Some(pnl/cost*100.0)}else{None::<f64>}})}).collect())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn records_realized_pnl_at_sell_price() {
+        let directory = tempdir().unwrap();
+        let database = Database::open(&directory.path().join("ledger.sqlite3")).unwrap();
+        database.init_ledger().unwrap();
+        database.record_buy(0, "测试股票", 2, 100.0).unwrap();
+        database.record_sell(0, 1, 110.0, false).unwrap();
+
+        assert!((database.realized_pnl().unwrap() - 10.0).abs() < f64::EPSILON);
+        let record = database.purchase_records().unwrap().pop().unwrap();
+        assert_eq!(record.shares, 1);
+        assert!((record.total_cost - 100.0).abs() < f64::EPSILON);
+    }
+}
+
 use rusqlite::OptionalExtension;

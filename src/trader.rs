@@ -31,7 +31,8 @@ impl<'a> DecisionExecutor<'a> {
         let id = decision
             .company_id
             .ok_or_else(|| anyhow!("AI decision missing company_id"))?;
-        if id != company.id {
+        let server_company_id = company.market_id.unwrap_or(company.id);
+        if id != company.id && id != server_company_id {
             return Err(anyhow!("decision company does not match loaded company"));
         }
         let shares = decision
@@ -39,7 +40,7 @@ impl<'a> DecisionExecutor<'a> {
             .ok_or_else(|| anyhow!("AI decision missing shares"))?;
         let req = TradeRequest {
             action,
-            company_id: id,
+            company_id: server_company_id,
             shares,
             source: "ai".into(),
             reason: Some(decision.reason.clone()),
