@@ -86,10 +86,10 @@ generateTokens();
 root.innerHTML = `
   <header class="app-bar">
     <div class="app-brand"><span class="brand-mark">B</span><div><strong>Bilicraft</strong><span>AI Stock</span></div></div>
-    <div class="app-actions"><span class="sync-label" id="sync-label">同步状态：--</span><md-icon-button id="theme-toggle" aria-label="切换主题">brightness_6</md-icon-button><md-icon-button id="refresh-all" aria-label="刷新数据">refresh</md-icon-button></div>
+    <div class="app-actions"><span class="sync-label" id="sync-label">同步状态：--</span><md-icon-button id="theme-toggle" aria-label="切换主题"><md-icon>brightness_6</md-icon></md-icon-button><md-icon-button id="refresh-all" aria-label="刷新数据"><md-icon>refresh</md-icon></md-icon-button></div>
   </header>
   <div class="app-layout">
-    <aside class="rail" aria-label="主导航"><nav id="desktop-nav"></nav><div class="rail-footer"><md-icon-button id="settings-shortcut" aria-label="设置">settings</md-icon-button><span class="version">v0.1</span></div></aside>
+    <aside class="rail" aria-label="主导航"><nav id="desktop-nav"></nav><div class="rail-footer"><md-icon-button id="settings-shortcut" aria-label="设置"><md-icon>settings</md-icon></md-icon-button><span class="version">v0.1</span></div></aside>
     <main class="page" id="page" tabindex="-1"></main>
   </div>
   <nav class="mobile-nav" id="mobile-nav" aria-label="移动端导航"></nav>
