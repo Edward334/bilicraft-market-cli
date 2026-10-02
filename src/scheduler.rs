@@ -4,15 +4,20 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 pub fn spawn(state: AppState) {
-    let interval = state.config.ai.automation_interval_seconds.max(30);
     tokio::spawn(async move {
+        let interval = state
+            .config_snapshot()
+            .ai
+            .automation_interval_seconds
+            .max(30);
         let mut timer = tokio::time::interval(Duration::from_secs(interval));
         loop {
             timer.tick().await;
+            let config = state.config_snapshot();
             if !state.ai_enabled.load(Ordering::Relaxed)
                 || !state.automation_enabled.load(Ordering::Relaxed)
                 || state.circuit_breaker.load(Ordering::Relaxed)
-                || !risk::in_windows(Utc::now(), &state.config.risk.automation_windows)
+                || !risk::in_windows(Utc::now(), &config.risk.automation_windows)
             {
                 continue;
             }

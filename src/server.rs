@@ -67,8 +67,11 @@ pub async fn serve(state: AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn index() -> Html<String> {
-    Html(include_str!("../web/dist/index.html").to_string())
+async fn index() -> impl IntoResponse {
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        Html(include_str!("../web/dist/index.html").to_string()),
+    )
 }
 async fn status(State(s): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::to_value(s.status()).unwrap())
@@ -91,8 +94,9 @@ async fn kline(
     Path(id): Path<i64>,
     State(s): State<AppState>,
 ) -> Result<Json<Vec<crate::domain::KlinePoint>>, ApiError> {
+    let config = s.config_snapshot();
     s.market
-        .kline(id, &s.config.market.interval)
+        .kline(id, &config.market.interval)
         .await
         .map(Json)
         .map_err(ApiError::from)
@@ -101,8 +105,9 @@ async fn available_shares(
     Path(id): Path<i64>,
     State(s): State<AppState>,
 ) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    let config = s.config_snapshot();
     s.market
-        .available_shares(id, &s.config.market.interval)
+        .available_shares(id, &config.market.interval)
         .await
         .map(Json)
         .map_err(ApiError::from)
@@ -185,6 +190,7 @@ async fn trade(
     State(s): State<AppState>,
     Json(req): Json<TradeRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let config = s.config_snapshot();
     let session = current_session(&s)?;
     let gateway = StockCommandGateway::new(std::sync::Arc::new(session));
     let balance = gateway.balance().await.map_err(ApiError::from)?;
@@ -239,7 +245,7 @@ async fn trade(
         )
     };
     risk::validate(risk::RiskContext {
-        config: &s.config.risk,
+        config: &config.risk,
         now: Utc::now(),
         portfolio: &portfolio,
         company: &company,
@@ -301,6 +307,7 @@ async fn ai_run(
     State(s): State<AppState>,
     Json(input): Json<AiRunRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let config = s.config_snapshot();
     if !s.ai_enabled.load(Ordering::Relaxed) {
         return Err(ApiError::bad("AI is disabled"));
     }
@@ -339,7 +346,7 @@ async fn ai_run(
         captured_at: Utc::now(),
     };
     let key = s.secrets.read().ai_api_key.clone();
-    let provider = AiProvider::new(s.client.clone(), s.config.ai.clone(), key);
+    let provider = AiProvider::new(s.client.clone(), config.ai.clone(), key);
     let (decision, raw) = provider
         .decide(&companies, &portfolio, input.question.as_deref())
         .await
@@ -372,7 +379,7 @@ async fn ai_run(
         .shares
         .ok_or_else(|| ApiError::bad("AI decision missing shares"))?;
     let amount = company.latest_price.unwrap_or(0.0) * shares as f64;
-    let budget = risk::budget(&s.config.risk, portfolio.total_assets, portfolio.balance);
+    let budget = risk::budget(&config.risk, portfolio.total_assets, portfolio.balance);
     if decision.action == TradeAction::Buy && amount > budget {
         let message = format!("AI budget exceeded: amount={amount:.2}, budget={budget:.2}");
         let _ = s.db.lock().audit("risk", "ai", "rejected", &message);
@@ -394,7 +401,7 @@ async fn ai_run(
         )
     };
     risk::validate(risk::RiskContext {
-        config: &s.config.risk,
+        config: &config.risk,
         now: Utc::now(),
         portfolio: &portfolio,
         company: &company,
@@ -433,8 +440,8 @@ async fn ai_run(
     s.db.lock()
         .audit("trade", "ai", "success", &message)
         .map_err(ApiError::from)?;
-    if s.config.risk.max_daily_loss > 0.0
-        && s.db.lock().daily_loss().unwrap_or(0.0) >= s.config.risk.max_daily_loss
+    if config.risk.max_daily_loss > 0.0
+        && s.db.lock().daily_loss().unwrap_or(0.0) >= config.risk.max_daily_loss
     {
         s.circuit_breaker.store(true, Ordering::Relaxed);
         s.automation_enabled.store(false, Ordering::Relaxed);
@@ -450,60 +457,41 @@ async fn ai_run(
     ))
 }
 async fn ai_pause(State(s): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
-    let mut c = s.config.clone();
+    let mut c = s.config_snapshot();
     c.risk.automation_enabled = false;
     s.automation_enabled.store(false, Ordering::Relaxed);
-    c.save(
-        &s.config
-            .paths
-            .data_dir
-            .parent()
-            .unwrap_or(&s.config.paths.data_dir)
-            .join("config.toml"),
-    )
-    .map_err(ApiError::from)?;
+    c.save(&s.config_file).map_err(ApiError::from)?;
     Ok(Json(serde_json::json!({"automation_enabled":false})))
 }
 async fn ai_resume(State(s): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
     if !s.ai_enabled.load(Ordering::Relaxed) {
         return Err(ApiError::bad("AI is disabled"));
     }
-    let mut c = s.config.clone();
+    let mut c = s.config_snapshot();
     c.risk.automation_enabled = true;
     s.circuit_breaker.store(false, Ordering::Relaxed);
     s.automation_enabled.store(true, Ordering::Relaxed);
-    c.save(
-        &s.config
-            .paths
-            .data_dir
-            .parent()
-            .unwrap_or(&s.config.paths.data_dir)
-            .join("config.toml"),
-    )
-    .map_err(ApiError::from)?;
+    c.save(&s.config_file).map_err(ApiError::from)?;
     Ok(Json(serde_json::json!({"automation_enabled":true})))
 }
 
 async fn config(State(s): State<AppState>) -> Json<crate::config::Config> {
-    Json(s.config.clone())
+    Json(s.config_snapshot())
 }
 async fn update_config(
     State(s): State<AppState>,
     Json(patch): Json<serde_json::Value>,
 ) -> Result<Json<crate::config::Config>, ApiError> {
-    let mut merged = serde_json::to_value(&s.config).map_err(|e| ApiError::bad(e.to_string()))?;
+    let mut merged =
+        serde_json::to_value(s.config_snapshot()).map_err(|e| ApiError::bad(e.to_string()))?;
     merge_json(&mut merged, patch);
     let next: crate::config::Config =
         serde_json::from_value(merged).map_err(|e| ApiError::bad(e.to_string()))?;
-    next.save(
-        &next
-            .paths
-            .data_dir
-            .parent()
-            .unwrap_or(&next.paths.data_dir)
-            .join("config.toml"),
-    )
-    .map_err(ApiError::from)?;
+    next.save(&s.config_file).map_err(ApiError::from)?;
+    *s.runtime_config.write() = next.clone();
+    s.ai_enabled.store(next.ai.enabled, Ordering::Relaxed);
+    s.automation_enabled
+        .store(next.risk.automation_enabled, Ordering::Relaxed);
     Ok(Json(next))
 }
 fn merge_json(target: &mut serde_json::Value, patch: serde_json::Value) {
@@ -537,7 +525,8 @@ async fn update_secrets(
     if let Some(value) = input.qq_app_secret {
         next.qq_app_secret = (!value.trim().is_empty()).then_some(value);
     }
-    save_secrets(&s.config.paths.secrets_file, &next).map_err(ApiError::from)?;
+    let secrets_path = s.config_snapshot().paths.secrets_file;
+    save_secrets(&secrets_path, &next).map_err(ApiError::from)?;
     *s.secrets.write() = next;
     Ok(Json(serde_json::json!({"saved":true})))
 }
@@ -553,7 +542,7 @@ async fn auth_device(State(s): State<AppState>) -> Result<Json<serde_json::Value
         match crate::auth::complete_device_login(
             &state.client,
             &info,
-            &state.config.paths.secrets_file,
+            &state.config_snapshot().paths.secrets_file,
             &mut secrets,
         )
         .await
@@ -565,6 +554,20 @@ async fn auth_device(State(s): State<AppState>) -> Result<Json<serde_json::Value
                     "Microsoft login completed",
                     serde_json::json!({"player_name":session.name,"uuid":session.uuid}),
                 );
+                if state.config_snapshot().server.auto_connect {
+                    if let Err(error) = connect(State(state.clone())).await {
+                        let _ =
+                            state
+                                .db
+                                .lock()
+                                .audit("minecraft", "web", "failed", &error.to_string());
+                        state.emit(
+                            "error",
+                            "Minecraft auto-connect failed",
+                            serde_json::json!({}),
+                        );
+                    }
+                }
             }
             Err(error) => {
                 let _ = state
@@ -604,7 +607,7 @@ async fn qq_test(State(s): State<AppState>) -> Result<Json<serde_json::Value>, A
 async fn connect(State(s): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
     let sec = s.secrets.read().clone();
     let name = s
-        .config
+        .config_snapshot()
         .server
         .player_name
         .clone()
@@ -617,10 +620,11 @@ async fn connect(State(s): State<AppState>) -> Result<Json<serde_json::Value>, A
         .minecraft_uuid
         .ok_or_else(|| ApiError::bad("Minecraft UUID is not configured; run login"))?;
     let token = sec.minecraft_access_token.unwrap_or_default();
-    let protocol = s.config.server.protocol.unwrap_or(0);
+    let config = s.config_snapshot();
+    let protocol = config.server.protocol.unwrap_or(0);
     let session = minecraft::connect(
-        s.config.server.host.clone(),
-        s.config.server.port,
+        config.server.host.clone(),
+        config.server.port,
         protocol,
         name,
         uuid,
@@ -710,12 +714,19 @@ async fn events(
     Sse::new(stream)
         .keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(15)))
 }
+#[derive(Debug)]
 struct ApiError(String);
 impl ApiError {
     fn bad(s: impl Into<String>) -> Self {
         Self(s.into())
     }
 }
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for ApiError {}
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
         Self(e.to_string())

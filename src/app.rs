@@ -17,6 +17,8 @@ use tokio::sync::broadcast;
 #[derive(Clone)]
 pub struct AppState {
     pub config: Config,
+    pub config_file: std::path::PathBuf,
+    pub runtime_config: Arc<RwLock<Config>>,
     pub secrets: Arc<RwLock<Secrets>>,
     pub db: Arc<parking_lot::Mutex<Database>>,
     pub market: MarketClient,
@@ -33,7 +35,13 @@ pub struct AppState {
     pub auth_device: Arc<parking_lot::RwLock<Option<crate::auth::DeviceCodeInfo>>>,
 }
 impl AppState {
-    pub fn new(config: Config, db: Database, secrets: Secrets, client: reqwest::Client) -> Self {
+    pub fn new(
+        config: Config,
+        config_file: std::path::PathBuf,
+        db: Database,
+        secrets: Secrets,
+        client: reqwest::Client,
+    ) -> Self {
         let (market_tx, _) = broadcast::channel(256);
         let ai_enabled = config.ai.enabled;
         let automation_enabled = config.risk.automation_enabled;
@@ -46,6 +54,8 @@ impl AppState {
         );
         Self {
             market: MarketClient::new(client.clone(), config.market.clone()),
+            config_file,
+            runtime_config: Arc::new(RwLock::new(config.clone())),
             config,
             secrets,
             db: Arc::new(parking_lot::Mutex::new(db)),
@@ -61,6 +71,9 @@ impl AppState {
             qq,
             auth_device: Arc::new(parking_lot::RwLock::new(None)),
         }
+    }
+    pub fn config_snapshot(&self) -> Config {
+        self.runtime_config.read().clone()
     }
     pub fn emit(&self, kind: &str, message: &str, data: serde_json::Value) {
         let _ = self.events.send(AppEvent {
@@ -93,6 +106,7 @@ impl AppState {
         db.init_ledger()?;
         Ok(Self::new(
             c,
+            config_path,
             db,
             s,
             reqwest::Client::builder()
