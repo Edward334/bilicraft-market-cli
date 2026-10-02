@@ -182,6 +182,7 @@ pub struct SessionHandle {
     pub commands: mpsc::Sender<SessionCommand>,
     pub events: broadcast::Sender<ChatEvent>,
     pub state: watch::Receiver<ConnectionState>,
+    pub error: watch::Receiver<Option<String>>,
 }
 
 impl Clone for SessionHandle {
@@ -190,6 +191,7 @@ impl Clone for SessionHandle {
             commands: self.commands.clone(),
             events: self.events.clone(),
             state: self.state.clone(),
+            error: self.error.clone(),
         }
     }
 }
@@ -241,10 +243,12 @@ pub async fn connect(
     let (commands, receiver) = mpsc::channel(64);
     let (events, _) = broadcast::channel(256);
     let (state_tx, state_rx) = watch::channel(ConnectionState::Connecting);
+    let (error_tx, error_rx) = watch::channel(None);
     let session = SessionHandle {
         commands,
         events: events.clone(),
         state: state_rx,
+        error: error_rx,
     };
     tokio::spawn(run_session(
         stream,
@@ -257,6 +261,7 @@ pub async fn connect(
         receiver,
         events,
         state_tx,
+        error_tx,
     ));
     Ok(session)
 }
@@ -327,6 +332,7 @@ async fn run_session(
     mut commands: mpsc::Receiver<SessionCommand>,
     events: broadcast::Sender<ChatEvent>,
     state: watch::Sender<ConnectionState>,
+    error_state: watch::Sender<Option<String>>,
 ) {
     let result = session_inner(
         &mut stream,
@@ -341,7 +347,9 @@ async fn run_session(
         &state,
     )
     .await;
-    if result.is_err() {
+    if let Err(error) = result {
+        tracing::error!(error=?error, "Minecraft session actor stopped");
+        let _ = error_state.send(Some(error.to_string()));
         let current = *state.borrow();
         let terminal = if current == ConnectionState::Connected {
             ConnectionState::Disconnected

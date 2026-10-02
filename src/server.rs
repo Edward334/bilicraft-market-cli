@@ -580,7 +580,10 @@ async fn connect(State(s): State<AppState>) -> Result<Json<serde_json::Value>, A
         .server
         .player_name
         .clone()
-        .or(sec.minecraft_player_name)
+        .filter(|value| !value.trim().is_empty())
+        .or(sec
+            .minecraft_player_name
+            .filter(|value| !value.trim().is_empty()))
         .ok_or_else(|| ApiError::bad("player_name is not configured"))?;
     let uuid = sec
         .minecraft_uuid
@@ -600,23 +603,34 @@ async fn connect(State(s): State<AppState>) -> Result<Json<serde_json::Value>, A
     *s.minecraft.write() = Some(session.clone());
     *s.minecraft_state.write() = ConnectionState::LoggingIn;
     let state = s.minecraft_state.clone();
+    let error_state = s.minecraft_error.clone();
+    *error_state.write() = None;
     let events = s.events.clone();
     let mut rx = session.state.clone();
+    let mut error_rx = session.error.clone();
+    *s.minecraft_state.write() = *rx.borrow();
     tokio::spawn(async move {
         loop {
-            if rx.changed().await.is_err() {
-                break;
-            }
-            let now = *rx.borrow();
-            *state.write() = now;
-            let _ = events.send(AppEvent {
-                kind: "minecraft".into(),
-                message: format!("Minecraft connection state: {now:?}"),
-                at: Utc::now(),
-                data: serde_json::json!({"state":format!("{now:?}")}),
-            });
-            if matches!(now, ConnectionState::Disconnected | ConnectionState::Failed) {
-                break;
+            tokio::select! {
+                changed = rx.changed() => {
+                    if changed.is_err() { break; }
+                    let now = *rx.borrow();
+                    *state.write() = now;
+                    if matches!(now, ConnectionState::Disconnected | ConnectionState::Failed) {
+                        *error_state.write() = Some(format!("Minecraft session ended in {now:?}"));
+                    }
+                    let _ = events.send(AppEvent {
+                        kind: "minecraft".into(),
+                        message: format!("Minecraft connection state: {now:?}"),
+                        at: Utc::now(),
+                        data: serde_json::json!({"state":format!("{now:?}")}),
+                    });
+                    if matches!(now, ConnectionState::Disconnected | ConnectionState::Failed) { break; }
+                }
+                changed = error_rx.changed() => {
+                    if changed.is_err() { break; }
+                    if let Some(error) = error_rx.borrow().clone() { *error_state.write() = Some(error); }
+                }
             }
         }
     });

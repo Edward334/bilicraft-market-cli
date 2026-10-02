@@ -116,4 +116,6 @@ pub struct ServiceStatus {
     pub ai_enabled: bool,
     pub automation_enabled: bool,
     pub circuit_breaker: bool,
+    #[serde(default)]
+    pub minecraft_error: Option<String>,
 }

@@ -1,5 +1,6 @@
 /target
 /data
+/config.toml
 /backups
 /web/node_modules
 /web/dist

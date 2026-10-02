@@ -24,6 +24,7 @@ pub struct AppState {
     pub client: reqwest::Client,
     pub minecraft: Arc<parking_lot::RwLock<Option<SessionHandle>>>,
     pub minecraft_state: Arc<parking_lot::RwLock<ConnectionState>>,
+    pub minecraft_error: Arc<parking_lot::RwLock<Option<String>>>,
     pub ai_enabled: Arc<AtomicBool>,
     pub automation_enabled: Arc<AtomicBool>,
     pub circuit_breaker: Arc<AtomicBool>,
@@ -52,6 +53,7 @@ impl AppState {
             client,
             minecraft: Arc::new(parking_lot::RwLock::new(None)),
             minecraft_state: Arc::new(parking_lot::RwLock::new(ConnectionState::Disconnected)),
+            minecraft_error: Arc::new(parking_lot::RwLock::new(None)),
             ai_enabled: Arc::new(AtomicBool::new(ai_enabled)),
             automation_enabled: Arc::new(AtomicBool::new(automation_enabled)),
             circuit_breaker: Arc::new(AtomicBool::new(false)),
@@ -77,6 +79,7 @@ impl AppState {
             ai_enabled: self.ai_enabled.load(Ordering::Relaxed),
             automation_enabled: self.automation_enabled.load(Ordering::Relaxed),
             circuit_breaker: self.circuit_breaker.load(Ordering::Relaxed),
+            minecraft_error: self.minecraft_error.read().clone(),
         }
     }
     pub fn load(root: &std::path::Path) -> Result<Self> {
