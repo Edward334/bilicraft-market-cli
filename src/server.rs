@@ -461,6 +461,7 @@ async fn ai_pause(State(s): State<AppState>) -> Result<Json<serde_json::Value>, 
     c.risk.automation_enabled = false;
     s.automation_enabled.store(false, Ordering::Relaxed);
     c.save(&s.config_file).map_err(ApiError::from)?;
+    *s.runtime_config.write() = c;
     Ok(Json(serde_json::json!({"automation_enabled":false})))
 }
 async fn ai_resume(State(s): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
@@ -472,6 +473,7 @@ async fn ai_resume(State(s): State<AppState>) -> Result<Json<serde_json::Value>,
     s.circuit_breaker.store(false, Ordering::Relaxed);
     s.automation_enabled.store(true, Ordering::Relaxed);
     c.save(&s.config_file).map_err(ApiError::from)?;
+    *s.runtime_config.write() = c;
     Ok(Json(serde_json::json!({"automation_enabled":true})))
 }
 
