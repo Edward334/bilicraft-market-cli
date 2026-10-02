@@ -455,7 +455,11 @@ impl QqService {
     }
 
     pub async fn send_text(&self, text: &str) -> Result<()> {
-        for target in self.targets() {
+        let targets = self.targets();
+        if targets.is_empty() {
+            bail!("QQ message target is not configured");
+        }
+        for target in targets {
             self.send_target(&target, text).await?;
         }
         Ok(())
