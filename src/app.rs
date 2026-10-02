@@ -33,6 +33,7 @@ pub struct AppState {
     pub automation_running: Arc<AtomicBool>,
     pub qq: QqService,
     pub auth_device: Arc<parking_lot::RwLock<Option<crate::auth::DeviceCodeInfo>>>,
+    pub web_auth: crate::web_auth::WebAuthState,
 }
 impl AppState {
     pub fn new(
@@ -70,6 +71,7 @@ impl AppState {
             automation_running: Arc::new(AtomicBool::new(false)),
             qq,
             auth_device: Arc::new(parking_lot::RwLock::new(None)),
+            web_auth: crate::web_auth::WebAuthState::new(),
         }
     }
     pub fn config_snapshot(&self) -> Config {

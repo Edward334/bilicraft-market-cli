@@ -232,6 +232,8 @@ pub struct Secrets {
     pub qq_access_token: Option<String>,
     #[serde(default)]
     pub qq_access_token_expires_at: Option<i64>,
+    #[serde(default)]
+    pub web_password_hash: Option<String>,
 }
 
 impl Config {

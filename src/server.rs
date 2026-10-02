@@ -7,12 +7,15 @@ use crate::{
     ledger::PurchaseRecord,
     minecraft::{self, ConnectionState, SessionHandle},
     risk,
+    web_auth::{AuthState, WebAuthSecrets, WebAuthState},
 };
 use anyhow::anyhow;
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Path, State},
     http::{StatusCode, header},
+    middleware::Next,
     response::{Html, IntoResponse, Response, Sse},
     routing::{get, post, put},
 };
@@ -42,6 +45,11 @@ pub async fn serve(state: AppState) -> anyhow::Result<()> {
         .route("/api/ai/pause", post(ai_pause))
         .route("/api/ai/resume", post(ai_resume))
         .route("/api/auth/status", get(auth_status))
+        .route("/api/web-auth/status", get(web_auth_status))
+        .route("/api/web-auth/setup", post(web_auth_setup))
+        .route("/api/web-auth/login", post(web_auth_login))
+        .route("/api/web-auth/logout", post(web_auth_logout))
+        .route("/api/web-auth/password", put(web_auth_password))
         .route("/api/config", get(config).put(update_config))
         .route("/api/secrets", put(update_secrets))
         .route("/api/auth/device", post(auth_device))
@@ -50,7 +58,11 @@ pub async fn serve(state: AppState) -> anyhow::Result<()> {
         .route("/api/qq/test", post(qq_test))
         .route("/api/connect", post(connect))
         .route("/api/disconnect", post(disconnect))
-        .route("/", get(index));
+        .route("/", get(index))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            web_auth_middleware,
+        ));
     crate::scheduler::spawn(state.clone());
     if state.config.qq.enabled {
         let qq = state.qq.clone();
@@ -75,6 +87,146 @@ async fn index() -> impl IntoResponse {
 }
 async fn status(State(s): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::to_value(s.status()).unwrap())
+}
+
+fn web_auth_secrets(secrets: &crate::config::Secrets) -> WebAuthSecrets {
+    WebAuthSecrets {
+        password_hash: secrets.web_password_hash.clone(),
+    }
+}
+
+fn web_auth_state(s: &AppState, headers: &axum::http::HeaderMap) -> AuthState {
+    s.web_auth
+        .state(&web_auth_secrets(&s.secrets.read()), headers)
+}
+
+async fn web_auth_middleware(
+    State(s): State<AppState>,
+    request: axum::http::Request<Body>,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    let public = path == "/"
+        || matches!(
+            path,
+            "/api/web-auth/status"
+                | "/api/web-auth/setup"
+                | "/api/web-auth/login"
+                | "/api/web-auth/logout"
+        );
+    if public || !path.starts_with("/api/") {
+        return next.run(request).await;
+    }
+    if matches!(
+        web_auth_state(&s, request.headers()),
+        AuthState::Authenticated
+    ) {
+        next.run(request).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error":"web authentication required"})),
+        )
+            .into_response()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct WebPasswordInput {
+    password: String,
+    confirmation: String,
+}
+
+async fn web_auth_status(
+    State(s): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Json<serde_json::Value> {
+    let state = web_auth_state(&s, &headers);
+    Json(serde_json::json!({
+        "state": match state { AuthState::SetupRequired => "setup_required", AuthState::LoginRequired => "login_required", AuthState::Authenticated => "authenticated" },
+        "password_configured": !matches!(state, AuthState::SetupRequired),
+    }))
+}
+
+async fn web_auth_setup(
+    State(s): State<AppState>,
+    Json(input): Json<WebPasswordInput>,
+) -> Result<impl IntoResponse, ApiError> {
+    let mut secrets = s.secrets.read().clone();
+    let mut auth_secrets = web_auth_secrets(&secrets);
+    s.web_auth
+        .set_password(
+            &mut auth_secrets,
+            &input.password,
+            &input.confirmation,
+            false,
+        )
+        .map_err(ApiError::from)?;
+    secrets.web_password_hash = auth_secrets.password_hash;
+    save_secrets(&s.config_snapshot().paths.secrets_file, &secrets).map_err(ApiError::from)?;
+    *s.secrets.write() = secrets;
+    let token = s.web_auth.create_session();
+    Ok((
+        [(header::SET_COOKIE, WebAuthState::session_cookie(&token))],
+        Json(serde_json::json!({"state":"authenticated"})),
+    ))
+}
+
+async fn web_auth_login(
+    State(s): State<AppState>,
+    Json(input): Json<WebPasswordInput>,
+) -> Result<impl IntoResponse, ApiError> {
+    let secrets = s.secrets.read().clone();
+    if !s
+        .web_auth
+        .verify_password(&web_auth_secrets(&secrets), &input.password)
+    {
+        return Err(ApiError::bad("invalid web password"));
+    }
+    let token = s.web_auth.create_session();
+    Ok((
+        [(header::SET_COOKIE, WebAuthState::session_cookie(&token))],
+        Json(serde_json::json!({"state":"authenticated"})),
+    ))
+}
+
+async fn web_auth_logout(
+    State(s): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    s.web_auth.clear_session(&headers);
+    (
+        [(header::SET_COOKIE, WebAuthState::clear_cookie())],
+        Json(serde_json::json!({"state":"logged_out"})),
+    )
+}
+
+async fn web_auth_password(
+    State(s): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(input): Json<WebPasswordInput>,
+) -> Result<impl IntoResponse, ApiError> {
+    if !matches!(web_auth_state(&s, &headers), AuthState::Authenticated) {
+        return Err(ApiError::bad("web authentication required"));
+    }
+    let mut secrets = s.secrets.read().clone();
+    let mut auth_secrets = web_auth_secrets(&secrets);
+    s.web_auth
+        .set_password(
+            &mut auth_secrets,
+            &input.password,
+            &input.confirmation,
+            true,
+        )
+        .map_err(ApiError::from)?;
+    secrets.web_password_hash = auth_secrets.password_hash;
+    save_secrets(&s.config_snapshot().paths.secrets_file, &secrets).map_err(ApiError::from)?;
+    *s.secrets.write() = secrets;
+    s.web_auth.clear_session(&headers);
+    Ok((
+        [(header::SET_COOKIE, WebAuthState::clear_cookie())],
+        Json(serde_json::json!({"state":"password_changed","relogin_required":true})),
+    ))
 }
 async fn auth_status(State(s): State<AppState>) -> Json<serde_json::Value> {
     let sec = s.secrets.read();

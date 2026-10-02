@@ -25,7 +25,7 @@ cp config.example.toml config.toml
 ./scripts/start.sh
 ```
 
-浏览器打开 `http://127.0.0.1:8787`。默认 AI 和自动化交易关闭。
+浏览器打开 `http://127.0.0.1:8787`。首次进入 Web UI 时必须设置访问密码；密码以 PBKDF2-SHA256 哈希保存，不写入明文。之后每次访问需要登录，设置页可以修改访问密码。默认 AI 和自动化交易关闭。
 
 可用命令：
 
@@ -52,7 +52,7 @@ bilicraft-ai-stock audit
 - `[ai]`：OpenAI 兼容接口。API key 放在 `data/secrets.json`，不要写进 `config.toml`。
 - `[risk]`：AI 固定预算、总资产百分比、交易/自动化窗口、单笔金额、每日损失、每日次数、冷却和最大持仓。
 - `[qq]`：QQ API 地址、推送格式和目标。目标使用频道 ID、群 OpenID 或用户 OpenID。
-- `[web]`：Web 监听地址。默认只监听本机，公网使用 Nginx/Caddy 反代。
+- `[web]`：Web 监听地址。默认只监听本机，公网使用 Nginx/Caddy 反代。Web UI 访问密码不在 `config.toml` 中，保存在 `data/secrets.json` 的哈希字段中。
 
 任何缺失预算或时间段配置都不会自动开启 AI 交易。AI 返回的价格、余额和持仓只作为分析输入，执行器会重新从 Minecraft 服务器读取事实。
 

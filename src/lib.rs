@@ -15,5 +15,6 @@ pub mod scheduler;
 pub mod server;
 pub mod state;
 pub mod trader;
+pub mod web_auth;
 
 pub const APP_NAME: &str = "bilicraft-ai-stock";
