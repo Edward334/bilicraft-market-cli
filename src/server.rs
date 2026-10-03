@@ -638,6 +638,7 @@ async fn update_config(
 ) -> Result<Json<crate::config::Config>, ApiError> {
     let mut merged =
         serde_json::to_value(s.config_snapshot()).map_err(|e| ApiError::bad(e.to_string()))?;
+    validate_config_patch(&merged, &patch)?;
     merge_json(&mut merged, patch);
     let next: crate::config::Config =
         serde_json::from_value(merged).map_err(|e| ApiError::bad(e.to_string()))?;
@@ -648,6 +649,24 @@ async fn update_config(
         .store(next.risk.automation_enabled, Ordering::Relaxed);
     Ok(Json(next))
 }
+fn validate_config_patch(
+    target: &serde_json::Value,
+    patch: &serde_json::Value,
+) -> Result<(), ApiError> {
+    let fields = patch
+        .as_object()
+        .ok_or_else(|| ApiError::bad("configuration patch must be an object"))?;
+    for (key, value) in fields {
+        let existing = target
+            .get(key)
+            .ok_or_else(|| ApiError::bad(format!("unknown configuration field: {key}")))?;
+        if existing.is_object() {
+            validate_config_patch(existing, value)?;
+        }
+    }
+    Ok(())
+}
+
 fn merge_json(target: &mut serde_json::Value, patch: serde_json::Value) {
     if let (Some(target), Some(patch)) = (target.as_object_mut(), patch.as_object()) {
         for (key, value) in patch {
@@ -893,5 +912,40 @@ impl IntoResponse for ApiError {
             Json(serde_json::json!({"error":self.0})),
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn config_save_persists_nested_fields_and_rejects_flat_payloads() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::load(root.path()).unwrap();
+        let bad = update_config(
+            State(state.clone()),
+            Json(serde_json::json!({"ai_budget": 20000})),
+        )
+        .await;
+        assert!(bad.is_err());
+        assert!(!state.config_file.exists());
+        let patch = serde_json::json!({"risk": {
+            "ai_budget": 20000, "ai_budget_percent": 10,
+            "max_single_trade": 5000, "max_daily_loss": 2000,
+            "max_daily_trades": 5, "max_positions": 5,
+            "automation_enabled": false, "trading_windows": [], "automation_windows": []
+        }});
+        let Json(saved) = update_config(State(state.clone()), Json(patch))
+            .await
+            .unwrap();
+        assert_eq!(saved.risk.ai_budget, 20000.0);
+        assert_eq!(state.config_snapshot().risk.max_positions, 5);
+        let persisted = crate::config::Config::load(&state.config_file).unwrap();
+        assert_eq!(persisted.risk.ai_budget_percent, 10.0);
+        let restarted = AppState::load(root.path()).unwrap();
+        assert_eq!(restarted.config_snapshot().risk.ai_budget, 20000.0);
+        assert_eq!(restarted.config_snapshot().risk.max_single_trade, 5000.0);
+        assert!(!restarted.status().automation_enabled);
     }
 }
