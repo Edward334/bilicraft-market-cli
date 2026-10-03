@@ -231,8 +231,22 @@ async fn web_auth_password(
 }
 async fn auth_status(State(s): State<AppState>) -> Json<serde_json::Value> {
     let sec = s.secrets.read();
+    let device = s.auth_device.read();
+    let error = s.auth_error.read();
+    let state = if device.is_some() {
+        "waiting_for_login"
+    } else if s.auth_requesting.load(Ordering::Relaxed) {
+        "requesting_code"
+    } else if error.is_some() {
+        "failed"
+    } else if sec.minecraft_access_token.is_some() {
+        "authenticated"
+    } else {
+        "signed_out"
+    };
     Json(
-        serde_json::json!({"state": if sec.minecraft_access_token.is_some() {"authenticated"} else {"signed_out"}, "player_name": sec.minecraft_player_name, "uuid": sec.minecraft_uuid}),
+        serde_json::json!({"state":state, "error":*error, "player_name":sec.minecraft_player_name, "uuid":sec.minecraft_uuid,
+        "user_code":device.as_ref().map(|d|&d.user_code), "verification_uri":device.as_ref().map(|d|&d.verification_uri)}),
     )
 }
 async fn companies(
@@ -804,25 +818,64 @@ async fn update_secrets(
     *s.secrets.write() = next;
     Ok(Json(serde_json::json!({"saved":true})))
 }
+struct AuthRequestGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+impl Drop for AuthRequestGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
 async fn auth_device(State(s): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+    if s.auth_requesting.swap(true, Ordering::Relaxed) {
+        return Err(ApiError::bad(
+            "Microsoft login is already in progress; refresh login status",
+        ));
+    }
+    let guard = AuthRequestGuard(s.auth_requesting.clone());
+    *s.auth_error.write() = None;
     let info = crate::auth::request_device_code(&s.client)
         .await
-        .map_err(ApiError::from)?;
+        .map_err(|error| {
+            let message = format!("{error:#}");
+            *s.auth_error.write() = Some(message.clone());
+            ApiError::bad(message)
+        })?;
     let response = serde_json::json!({"verification_uri":info.verification_uri,"user_code":info.user_code,"expires_in":info.expires_in});
     *s.auth_device.write() = Some(info.clone());
     let state = s.clone();
     tokio::spawn(async move {
+        let _guard = guard;
         let mut secrets = state.secrets.read().clone();
-        match crate::auth::complete_device_login(
-            &state.client,
-            &info,
-            &state.config_snapshot().paths.secrets_file,
-            &mut secrets,
+        let login = tokio::time::timeout(
+            Duration::from_secs(info.expires_in + 60),
+            crate::auth::complete_device_login_without_save(&state.client, &info, &mut secrets),
         )
         .await
-        {
+        .unwrap_or_else(|_| {
+            Err(anyhow::anyhow!(
+                "Microsoft login timed out; request a new device code"
+            ))
+        });
+        match login {
             Ok(session) => {
-                *state.secrets.write() = secrets;
+                // Preserve keys and Web password changes made while waiting for login.
+                {
+                    let mut current = state.secrets.write();
+                    let mut next = current.clone();
+                    next.minecraft_access_token = secrets.minecraft_access_token;
+                    next.minecraft_player_name = secrets.minecraft_player_name;
+                    next.minecraft_uuid = secrets.minecraft_uuid;
+                    next.microsoft_refresh_token = secrets.microsoft_refresh_token;
+                    if let Err(error) =
+                        save_secrets(&state.config_snapshot().paths.secrets_file, &next)
+                    {
+                        *state.auth_error.write() =
+                            Some(format!("Failed to save login: {error:#}"));
+                        *state.auth_device.write() = None;
+                        return;
+                    }
+                    *current = next;
+                }
                 state.emit(
                     "auth",
                     "Microsoft login completed",
@@ -844,6 +897,7 @@ async fn auth_device(State(s): State<AppState>) -> Result<Json<serde_json::Value
                 }
             }
             Err(error) => {
+                *state.auth_error.write() = Some(format!("{error:#}"));
                 let _ = state
                     .db
                     .lock()
@@ -1019,6 +1073,34 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod config_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn auth_status_exposes_progress_and_errors_without_device_secret() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::load(root.path()).unwrap();
+        state.auth_requesting.store(true, Ordering::Relaxed);
+        assert_eq!(
+            auth_status(State(state.clone())).await.0["state"],
+            "requesting_code"
+        );
+        *state.auth_device.write() = Some(crate::auth::DeviceCodeInfo {
+            device_code: "private-device-secret".into(),
+            user_code: "TEST1234".into(),
+            verification_uri: "https://www.microsoft.com/link".into(),
+            interval: 5,
+            expires_in: 900,
+        });
+        let status = auth_status(State(state.clone())).await.0;
+        assert_eq!(status["state"], "waiting_for_login");
+        assert_eq!(status["user_code"], "TEST1234");
+        assert!(!status.to_string().contains("private-device-secret"));
+        *state.auth_device.write() = None;
+        state.auth_requesting.store(false, Ordering::Relaxed);
+        *state.auth_error.write() = Some("Microsoft request timed out".into());
+        let status = auth_status(State(state)).await.0;
+        assert_eq!(status["state"], "failed");
+        assert_eq!(status["error"], "Microsoft request timed out");
+    }
 
     #[tokio::test]
     async fn stopped_automation_uses_shared_executor_without_http() {

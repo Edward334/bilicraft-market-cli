@@ -40,11 +40,15 @@ pub async fn request_device_code(client: &Client) -> Result<DeviceCodeInfo> {
             ("client_id", CLIENT_ID),
             ("scope", "XboxLive.signin offline_access"),
         ])
+        .timeout(Duration::from_secs(20))
         .send()
-        .await?
-        .error_for_status()?
+        .await
+        .context("Cannot reach Microsoft device login; check server internet access, DNS or proxy (20s timeout)")?
+        .error_for_status()
+        .context("Microsoft rejected the device-code request")?
         .json()
-        .await?)
+        .await
+        .context("Invalid Microsoft device-code response")?)
 }
 async fn poll_token(client: &Client, info: &DeviceCodeInfo) -> Result<TokenResponse> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(info.expires_in);
@@ -61,8 +65,10 @@ async fn poll_token(client: &Client, info: &DeviceCodeInfo) -> Result<TokenRespo
                 ("client_id", CLIENT_ID),
                 ("device_code", &info.device_code),
             ])
+            .timeout(Duration::from_secs(30))
             .send()
-            .await?
+            .await
+            .context("Microsoft token request failed or timed out")?
             .json()
             .await?;
         if let Some(access_token) = value.get("access_token").and_then(|v| v.as_str()) {
@@ -86,6 +92,16 @@ pub async fn complete_device_login(
     client: &Client,
     info: &DeviceCodeInfo,
     secrets_path: &std::path::Path,
+    secrets: &mut Secrets,
+) -> Result<Session> {
+    let session = complete_device_login_without_save(client, info, secrets).await?;
+    save_secrets(secrets_path, secrets)?;
+    Ok(session)
+}
+
+pub async fn complete_device_login_without_save(
+    client: &Client,
+    info: &DeviceCodeInfo,
     secrets: &mut Secrets,
 ) -> Result<Session> {
     let token = poll_token(client, info).await?;
@@ -144,7 +160,6 @@ pub async fn complete_device_login(
     secrets.minecraft_access_token = Some(access.clone());
     secrets.minecraft_uuid = Some(uuid.clone());
     secrets.minecraft_player_name = Some(name.clone());
-    save_secrets(secrets_path, secrets)?;
     Ok(Session {
         uuid,
         name,

@@ -34,6 +34,8 @@ pub struct AppState {
     pub trade_lock: Arc<tokio::sync::Mutex<()>>,
     pub qq: QqService,
     pub auth_device: Arc<parking_lot::RwLock<Option<crate::auth::DeviceCodeInfo>>>,
+    pub auth_error: Arc<parking_lot::RwLock<Option<String>>>,
+    pub auth_requesting: Arc<AtomicBool>,
     pub web_auth: crate::web_auth::WebAuthState,
 }
 impl AppState {
@@ -73,6 +75,8 @@ impl AppState {
             trade_lock: Arc::new(tokio::sync::Mutex::new(())),
             qq,
             auth_device: Arc::new(parking_lot::RwLock::new(None)),
+            auth_error: Arc::new(parking_lot::RwLock::new(None)),
+            auth_requesting: Arc::new(AtomicBool::new(false)),
             web_auth: crate::web_auth::WebAuthState::new(),
         }
     }

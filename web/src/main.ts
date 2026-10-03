@@ -265,7 +265,77 @@ function advancedSettings(title: string, ...controls: HTMLElement[]): HTMLElemen
   return details;
 }
 function settingsGroup(title: string, ...controls: HTMLElement[]) { const group = el('section', 'settings-group'); group.append(el('h3', '', title), ...controls); return group; }
-async function authPanel(form: HTMLElement) { const section = el('div', 'auth-panel'); const title = el('h3', '', 'Microsoft / Minecraft 登录'); const status = el('p', 'muted', '正在读取登录状态…'); const actions = el('div', 'button-row'); let polling = false; const refresh = async () => { try { const result = await api.authStatus(); const loggedIn = result.state === 'authenticated'; status.textContent = loggedIn ? `已登录：${text(result.player_name, '--')}（${text(result.uuid, '--')}）` : `登录状态：${text(result.state || result.status, '未知')}`; if (loggedIn && polling) { polling = false; toast('Microsoft 登录完成', 'success'); state.config = await api.config(); await loadBase(); renderPage(); } } catch (error) { status.textContent = `登录状态读取失败：${(error as Error).message}`; } }; const login = button('md-filled-button', '获取设备码并等待登录', async () => { try { const result = await api.request<Json>('/api/auth/device', { method: 'POST' }); status.textContent = `请访问 ${text(result.verification_uri, '--')}，输入代码 ${text(result.user_code, '--')}；页面会自动等待完成`; polling = true; const started = Date.now(); const loop = async () => { if (!polling || Date.now() - started > 15 * 60 * 1000) { polling = false; return; } await refresh(); if (polling) window.setTimeout(() => { void loop(); }, 3000); }; void loop(); toast('设备码已生成，请完成 Microsoft 登录', 'success'); } catch (error) { toast((error as Error).message, 'error'); } }); const refreshButton = button('md-outlined-button', '刷新登录状态', () => { void refresh(); }); append(actions, login, refreshButton); append(section, title, status, actions); form.append(section); await refresh(); if (state.page !== 'settings') return; }
+async function authPanel(form: HTMLElement) {
+  const section = el('div', 'auth-panel');
+  const title = el('h3', '', 'Microsoft / Minecraft 登录');
+  const status = el('p', 'muted', '正在读取登录状态…');
+  status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
+  const instructions = el('div', 'device-login');
+  const actions = el('div', 'button-row');
+  let polling = false;
+  let timer: number | undefined;
+  let stopped = false;
+  const visible = () => section.isConnected && state.page === 'settings' && state.settingsSection === 'minecraft';
+  const showCode = (result: Json) => {
+    instructions.replaceChildren();
+    if (!result.user_code || !result.verification_uri) return;
+    const link = el('a', 'login-link', '打开 Microsoft 登录页面');
+    link.href = String(result.verification_uri); link.target = '_blank'; link.rel = 'noopener noreferrer';
+    const code = el('strong', 'device-code', String(result.user_code));
+    instructions.append(el('p', '', '打开登录页面，输入下面的验证码，完成后这里会自动更新：'), link, code);
+  };
+  const failure = (error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    status.textContent = /timeout|timed out|Cannot reach|fetch|abort/i.test(message)
+      ? `登录请求超时或网络不可达：服务器需要能访问微软登录接口。请检查服务器网络、DNS 或代理后重试。详情：${message}`
+      : `登录失败：${message}`;
+    status.classList.add('loss');
+    login.removeAttribute('disabled'); login.textContent = '重试获取设备码';
+    polling = false;
+  };
+  const refresh = async () => {
+    try {
+      const result = await api.request<Json>('/api/auth/status', { signal: AbortSignal.timeout(10000) });
+      if (stopped) return;
+      status.classList.remove('loss');
+      if (result.state === 'failed') { failure(String(result.error || '请重试')); return; }
+      if (result.state === 'authenticated') {
+        status.textContent = `已登录：${text(result.player_name)}（${text(result.uuid)}）`;
+        instructions.replaceChildren(); login.removeAttribute('disabled'); login.textContent = '重新登录';
+        if (polling) { polling = false; toast('Microsoft 登录完成', 'success'); }
+      } else if (result.state === 'waiting_for_login' || result.state === 'requesting_code') {
+        status.textContent = result.state === 'requesting_code' ? '正在向微软获取设备码…' : '等待你完成 Microsoft 登录…';
+        login.setAttribute('disabled', ''); login.textContent = '正在等待登录';
+        showCode(result); polling = true;
+      } else {
+        status.textContent = '尚未登录，请获取设备码';
+        login.removeAttribute('disabled'); login.textContent = '获取设备码并登录'; polling = false;
+      }
+    } catch (error) { failure(error); }
+  };
+  const poll = () => {
+    if (timer !== undefined) window.clearTimeout(timer);
+    timer = window.setTimeout(async () => {
+      if (!visible()) { stopped = true; return; }
+      await refresh(); if (polling) poll();
+    }, 3000);
+  };
+  const login = button('md-filled-button', '获取设备码并登录', async () => {
+    login.setAttribute('disabled', ''); login.textContent = '正在获取设备码…';
+    status.classList.remove('loss'); status.textContent = '正在向微软获取设备码，请稍候（最多约 25 秒）…';
+    instructions.replaceChildren();
+    try {
+      const result = await api.request<Json>('/api/auth/device', { method: 'POST', signal: AbortSignal.timeout(25000) });
+      if (!visible()) return;
+      showCode(result); status.textContent = '设备码已生成，等待你完成 Microsoft 登录…';
+      login.textContent = '正在等待登录'; polling = true; poll();
+    } catch (error) { failure(error); }
+  });
+  const refreshButton = button('md-outlined-button', '刷新登录状态', async () => { await refresh(); if (polling) poll(); });
+  append(actions, login, refreshButton); append(section, title, status, instructions, actions); form.append(section);
+  await refresh(); if (polling) poll();
+}
+
 function collectFields(container: HTMLElement): Json { const result: Json = {}; container.querySelectorAll<HTMLElement>('[data-path]').forEach((node) => { const path = node.dataset.path!.split('.'); let current = result; path.slice(0, -1).forEach((key) => { current[key] = (current[key] && typeof current[key] === 'object' ? current[key] : {}) as Json; current = current[key] as Json; }); const raw = inputValue(node); let value: unknown = node.dataset.boolean === 'true' ? (node as HTMLElement & { selected?: boolean }).selected === true : node.getAttribute('type') === 'number' ? Number(raw) : raw; if (node.dataset.json === 'true') { try { value = raw.trim() ? JSON.parse(raw) : []; } catch { throw new Error(`${path.join('.')} 必须是有效 JSON`); } } current[path[path.length - 1]] = value; }); return result; }
 function configurationPatch(section: string, values: Json): Json {
   const key = section === 'minecraft' ? 'server' : section === 'openai' ? 'ai' : section;

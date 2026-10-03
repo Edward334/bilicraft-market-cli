@@ -102,6 +102,12 @@ button { -webkit-tap-highlight-color: transparent; }
 .app-brand strong { font-size: 16px; font-weight: 600; line-height: 24px; }
 .app-brand span:not(.brand-mark) { color: var(--md-sys-color-on-surface-variant); font-size: 12px; line-height: 16px; }
 .brand-mark { display: grid; flex: 0 0 auto; place-items: center; width: 40px; height: 40px; border-radius: var(--shape-lg); background: var(--md-sys-color-primary-container); color: var(--md-sys-color-on-primary-container); font-size: 20px; font-weight: 700; }
+.auth-panel { grid-column: 1 / -1; min-width: 0; }
+.auth-panel p { overflow-wrap: anywhere; }
+.device-login:not(:empty) { display: grid; gap: 12px; margin: 16px 0; padding: 16px; border-radius: var(--shape-md); background: var(--md-sys-color-surface-container-high); }
+.device-login p { margin: 0; }
+.login-link { color: var(--md-sys-color-primary); }
+.device-code { font-family: monospace; font-size: 28px; letter-spacing: 3px; user-select: all; }
 .settings-toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; }
 .advanced-settings { grid-column: 1 / -1; min-width: 0; padding: 16px; border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--shape-lg); }
 .advanced-settings summary { cursor: pointer; min-height: 40px; font-weight: 500; }
