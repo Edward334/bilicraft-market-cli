@@ -75,7 +75,28 @@ function md(tag: string, label?: string, attrs: Record<string, string> = {}): HT
   if (label !== undefined) node.textContent = label;
   return node;
 }
-function icon(name: string): HTMLElement { return md('md-icon', name); }
+const iconPaths: Record<string, string[]> = {
+  brightness_6: ['<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/>'],
+  refresh: ['<path d="M20 11a8.1 8.1 0 0 0-14.8-4L3 10"/><path d="M3 4v6h6"/><path d="M4 13a8.1 8.1 0 0 0 14.8 4L21 14"/><path d="M21 20v-6h-6"/>'],
+  settings: ['<path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="m19.4 15 .1.1a2 2 0 0 1-2.8 2.8l-.1-.1a2 2 0 0 0-3.4 1.4v.2a2 2 0 0 1-4 0v-.2a2 2 0 0 0-3.4-1.4l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A2 2 0 0 0 1.6 12a2 2 0 0 0-1.4-3.4H0a2 2 0 0 1 0-4h.2A2 2 0 0 0 1.6 1.2l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A2 2 0 0 0 7.8-.2V-.4a2 2 0 0 1 4 0v.2a2 2 0 0 0 3.4 1.4l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1A2 2 0 0 0 19.4 7h.2a2 2 0 0 1 0 4h-.2a2 2 0 0 0 0 4Z" transform="translate(0 3) scale(.75)"/>'],
+  candlestick_chart: ['<path d="M5 19V9m0 0V5m0 4h3M12 19V5m0 5h3m4 9V8m0 0V3m0 5h3"/><path d="M3 19h18"/>'],
+  star: ['<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-2.9-5.6 2.9 1.1-6.2L3 9.6l6.2-.9L12 3Z"/>'],
+  star_border: ['<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-2.9-5.6 2.9 1.1-6.2L3 9.6l6.2-.9L12 3Z"/>'],
+  account_balance_wallet: ['<path d="M4 6.5A2.5 2.5 0 0 1 6.5 4H20v4H6.5A2.5 2.5 0 0 0 4 10.5v7A2.5 2.5 0 0 0 6.5 20H20V9H6.5A2.5 2.5 0 0 1 4 6.5Z"/><path d="M20 13h-4a2 2 0 0 0 0 4h4"/><circle cx="16" cy="15" r=".5"/>'],
+  insights: ['<path d="M4 19V5m0 14h16"/><path d="m6 15 4-5 3 3 5-7"/>'],
+  smart_toy: ['<rect x="5" y="7" width="14" height="12" rx="3"/><path d="M12 3v4M8 12h.01M16 12h.01M9 16h6"/>'],
+  fact_check: ['<path d="M6 4h12v16H6z"/><path d="m9 9 1.5 1.5L13 8m-4 6 1.5 1.5L13 13"/>'],
+  data_exploration: ['<path d="M4 19V5m0 14h16"/><path d="m7 15 3-4 3 2 4-6"/><circle cx="17" cy="7" r="1"/>'],
+  error_outline: ['<circle cx="12" cy="12" r="9"/><path d="M12 7v5m0 3v.01"/>'],
+};
+function icon(name: string): SVGSVGElement {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.classList.add('icon-glyph');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.innerHTML = (iconPaths[name] ?? ['<circle cx="12" cy="12" r="8"/>']).join('');
+  return svg;
+}
 function append(parent: ParentNode, ...children: (Node | null | undefined)[]) { children.filter(Boolean).forEach((child) => parent.appendChild(child!)); }
 function clear(node: Node) { while (node.firstChild) node.removeChild(node.firstChild); }
 function tone(value: unknown): string { return positive(value) ? 'gain' : 'loss'; }
@@ -91,16 +112,17 @@ generateTokens();
 root.innerHTML = `
   <header class="app-bar">
     <div class="app-brand"><span class="brand-mark">B</span><div><strong>Bilicraft</strong><span>AI Stock</span></div></div>
-    <div class="app-actions"><span class="sync-label" id="sync-label">同步状态：--</span><md-icon-button id="theme-toggle" aria-label="切换主题"><md-icon>brightness_6</md-icon></md-icon-button><md-icon-button id="refresh-all" aria-label="刷新数据"><md-icon>refresh</md-icon></md-icon-button></div>
+    <div class="app-actions"><span class="sync-label" id="sync-label">同步状态：--</span><md-icon-button id="theme-toggle" aria-label="切换主题"><span class="icon-slot" data-icon="brightness_6"></span></md-icon-button><md-icon-button id="refresh-all" aria-label="刷新数据"><span class="icon-slot" data-icon="refresh"></span></md-icon-button></div>
   </header>
   <div class="app-layout">
-    <aside class="rail" aria-label="主导航"><nav id="desktop-nav"></nav><div class="rail-footer"><md-icon-button id="settings-shortcut" aria-label="设置"><md-icon>settings</md-icon></md-icon-button><span class="version">v0.1</span></div></aside>
+    <aside class="rail" aria-label="主导航"><nav id="desktop-nav"></nav><div class="rail-footer"><md-icon-button id="settings-shortcut" aria-label="设置"><span class="icon-slot" data-icon="settings"></span></md-icon-button><span class="version">v0.1</span></div></aside>
     <main class="page" id="page" tabindex="-1"></main>
   </div>
   <nav class="mobile-nav" id="mobile-nav" aria-label="移动端导航"></nav>
   <div id="toast-region" aria-live="polite"></div>
   <md-dialog id="trade-dialog"><div slot="headline" id="trade-title">交易</div><div slot="content" id="trade-content"></div><div slot="actions"><md-text-button id="trade-cancel">取消</md-text-button><md-filled-button id="trade-submit">提交交易</md-filled-button></div></md-dialog>
 `;
+root.querySelectorAll<HTMLElement>('[data-icon]').forEach((slot) => slot.replaceWith(icon(slot.dataset.icon || '')));
 
 const pageNode = document.querySelector<HTMLElement>('#page')!;
 const syncLabel = document.querySelector<HTMLElement>('#sync-label')!;
