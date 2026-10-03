@@ -119,6 +119,8 @@ pub struct RiskConfig {
     #[serde(default)]
     pub automation_enabled: bool,
     #[serde(default)]
+    pub optional_limits_enabled: bool,
+    #[serde(default)]
     pub timezone: String,
     #[serde(default)]
     pub trading_windows: Vec<TimeWindow>,
@@ -148,6 +150,7 @@ impl Default for RiskConfig {
     fn default() -> Self {
         Self {
             automation_enabled: false,
+            optional_limits_enabled: false,
             timezone: "UTC".into(),
             trading_windows: vec![],
             automation_windows: vec![],

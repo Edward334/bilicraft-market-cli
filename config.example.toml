@@ -21,6 +21,7 @@ automation_interval_seconds = 900
 
 [risk]
 automation_enabled = false
+optional_limits_enabled = false
 timezone = "UTC"
 trading_windows = []
 automation_windows = []

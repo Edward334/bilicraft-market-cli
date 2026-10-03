@@ -1,54 +1,49 @@
 use crate::{app::AppState, risk};
 use chrono::Utc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
-        let interval = state
-            .config_snapshot()
-            .ai
-            .automation_interval_seconds
-            .max(30);
-        let mut timer = tokio::time::interval(Duration::from_secs(interval));
+        let mut timer = tokio::time::interval(Duration::from_secs(1));
+        let mut last_cycle: Option<Instant> = None;
+        let mut was_enabled = false;
         loop {
             timer.tick().await;
             let config = state.config_snapshot();
-            if !state.ai_enabled.load(Ordering::Relaxed)
-                || !state.automation_enabled.load(Ordering::Relaxed)
-                || state.circuit_breaker.load(Ordering::Relaxed)
-                || !risk::in_windows(Utc::now(), &config.risk.automation_windows)
+            let enabled = state.ai_enabled.load(Ordering::Relaxed)
+                && state.automation_enabled.load(Ordering::Relaxed);
+            if !enabled {
+                was_enabled = false;
+                continue;
+            }
+            if !was_enabled {
+                last_cycle = None;
+                was_enabled = true;
+            }
+            if config.risk.optional_limits_enabled
+                && (state.circuit_breaker.load(Ordering::Relaxed)
+                    || !risk::in_windows(Utc::now(), &config.risk.automation_windows))
             {
                 continue;
             }
+            let interval = Duration::from_secs(config.ai.automation_interval_seconds.max(30));
+            if last_cycle.is_some_and(|last| last.elapsed() < interval) {
+                continue;
+            }
+            last_cycle = Some(Instant::now());
             state.emit(
                 "ai_cycle",
                 "AI automation cycle started",
                 serde_json::json!({}),
             );
-            let url = format!("http://{}/api/ai/run", state.config.web.bind);
-            let response = state
-                .client
-                .post(url)
-                .json(&serde_json::json!({}))
-                .send()
-                .await;
-            match response {
-                Ok(response) if response.status().is_success() => state.emit(
+            // Call the shared executor directly; internal jobs do not use Web login cookies.
+            match crate::server::run_automation(state.clone()).await {
+                Ok(()) => state.emit(
                     "ai_cycle",
                     "AI automation cycle completed",
-                    serde_json::json!({"status":response.status().as_u16()}),
+                    serde_json::json!({}),
                 ),
-                Ok(response) => {
-                    let message =
-                        format!("AI automation cycle rejected: HTTP {}", response.status());
-                    state
-                        .db
-                        .lock()
-                        .audit("ai_cycle", "scheduler", "failed", &message)
-                        .ok();
-                    state.emit("error", &message, serde_json::json!({}));
-                }
                 Err(error) => {
                     let message = format!("AI automation cycle failed: {error}");
                     state

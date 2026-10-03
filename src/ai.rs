@@ -48,13 +48,14 @@ impl AiProvider {
         companies: &[StockCompany],
         portfolio: &PortfolioSnapshot,
         question: Option<&str>,
+        ai_account: &serde_json::Value,
     ) -> Result<(AiDecision, String)> {
         let key = self
             .key
             .as_deref()
             .context("AI API key is not configured")?;
         let context =
-            serde_json::json!({"companies":companies,"portfolio":portfolio,"question":question})
+            serde_json::json!({"companies":companies,"portfolio":portfolio,"question":question,"ai_account":ai_account,"instructions":"Only buy using ai_account.capital.available_cash, and only sell ai_account.positions. Realized profits are reinvested. Zero optional limits mean unlimited."})
                 .to_string();
         let system=self.config.system_prompt.clone().unwrap_or_else(||"你是 Bilicraft 虚拟股市交易策略。只能返回 JSON，字段 action=buy|sell|hold|no_trade、company_id、shares、reason、confidence、stop。不得假设资金或持仓，执行器会重新校验。".into());
         let body = Request {

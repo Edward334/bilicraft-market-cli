@@ -20,17 +20,17 @@ pub fn validate(c: RiskContext<'_>) -> Result<()> {
     if c.request.shares <= 0 {
         return Err(anyhow!("shares must be positive"));
     }
-    if !in_windows(c.now, r.trading_windows.as_slice()) {
+    if r.optional_limits_enabled && !in_windows(c.now, r.trading_windows.as_slice()) {
         return Err(anyhow!("outside trading window"));
     }
-    if r.max_daily_trades > 0 && c.daily_trades >= r.max_daily_trades {
+    if r.optional_limits_enabled && r.max_daily_trades > 0 && c.daily_trades >= r.max_daily_trades {
         return Err(anyhow!("daily trade limit reached"));
     }
-    if r.max_daily_loss > 0.0 && c.daily_loss <= -r.max_daily_loss {
+    if r.optional_limits_enabled && r.max_daily_loss > 0.0 && c.daily_loss >= r.max_daily_loss {
         return Err(anyhow!("daily loss limit reached"));
     }
     if let Some(last) = c.last_trade_at {
-        if (c.now - last).num_seconds() < (r.cooldown_seconds as i64) {
+        if r.optional_limits_enabled && (c.now - last).num_seconds() < (r.cooldown_seconds as i64) {
             return Err(anyhow!("trade cooldown active"));
         }
     }
@@ -43,7 +43,8 @@ pub fn validate(c: RiskContext<'_>) -> Result<()> {
         }
     }
     let server_company_id = c.company.market_id.unwrap_or(c.company.id);
-    if r.max_positions > 0
+    if r.optional_limits_enabled
+        && r.max_positions > 0
         && c.request.action == TradeAction::Buy
         && !c
             .portfolio
@@ -56,7 +57,7 @@ pub fn validate(c: RiskContext<'_>) -> Result<()> {
     }
     let price = c.company.latest_price.unwrap_or(0.0);
     let amount = price * c.request.shares as f64;
-    if r.max_single_trade > 0.0 && amount > r.max_single_trade {
+    if r.optional_limits_enabled && r.max_single_trade > 0.0 && amount > r.max_single_trade {
         return Err(anyhow!("single trade limit exceeded"));
     }
     if c.request.action == TradeAction::Buy {

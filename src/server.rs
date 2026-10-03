@@ -42,6 +42,7 @@ pub async fn serve(state: AppState) -> anyhow::Result<()> {
         .route("/api/events", get(events))
         .route("/api/trade", post(trade))
         .route("/api/ai/run", post(ai_run))
+        .route("/api/ai/capital", get(ai_capital))
         .route("/api/ai/pause", post(ai_pause))
         .route("/api/ai/resume", post(ai_resume))
         .route("/api/auth/status", get(auth_status))
@@ -342,6 +343,7 @@ async fn trade(
     State(s): State<AppState>,
     Json(req): Json<TradeRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let _guard = s.trade_lock.lock().await;
     let config = s.config_snapshot();
     let session = current_session(&s)?;
     let gateway = StockCommandGateway::new(std::sync::Arc::new(session));
@@ -366,6 +368,7 @@ async fn trade(
     company.available_shares = live.available_shares;
     let effective_request = TradeRequest {
         company_id: server_company_id,
+        source: "manual".into(),
         ..req.clone()
     };
     let metrics =
@@ -422,7 +425,8 @@ async fn trade(
         Ok(message) => {
             if action == "buy" {
                 s.db.lock()
-                    .record_buy(
+                    .record_owned_buy(
+                        false,
                         server_company_id,
                         &company.name,
                         req.shares,
@@ -431,7 +435,7 @@ async fn trade(
                     .map_err(ApiError::from)?;
             } else {
                 s.db.lock()
-                    .record_sell(server_company_id, req.shares, live.price, false)
+                    .record_owned_sell(false, server_company_id, req.shares, live.price)
                     .map_err(ApiError::from)?;
             }
             s.db.lock()
@@ -459,11 +463,50 @@ async fn ai_run(
     State(s): State<AppState>,
     Json(input): Json<AiRunRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    execute_ai(s, input.question, false).await
+}
+
+pub(crate) async fn run_automation(s: AppState) -> anyhow::Result<()> {
+    execute_ai(s, None, true)
+        .await
+        .map(|_| ())
+        .map_err(Into::into)
+}
+
+async fn ai_capital(State(s): State<AppState>) -> Result<Json<crate::ledger::AiCapital>, ApiError> {
+    let config = s.config_snapshot();
+    let session = s.minecraft.read().clone();
+    let cash = if let Some(session) = session {
+        Some(
+            StockCommandGateway::new(std::sync::Arc::new(session))
+                .balance()
+                .await
+                .map_err(ApiError::from)?,
+        )
+    } else {
+        None
+    };
+    Ok(Json(
+        s.db.lock()
+            .ai_capital(config.risk.ai_budget, cash)
+            .map_err(ApiError::from)?,
+    ))
+}
+
+async fn execute_ai(
+    s: AppState,
+    question: Option<String>,
+    automated: bool,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let _guard = s.trade_lock.lock().await;
+    if automated && !s.automation_enabled.load(Ordering::Relaxed) {
+        return Err(ApiError::bad("AI automation is stopped"));
+    }
     let config = s.config_snapshot();
     if !s.ai_enabled.load(Ordering::Relaxed) {
         return Err(ApiError::bad("AI is disabled"));
     }
-    if s.circuit_breaker.load(Ordering::Relaxed) {
+    if config.risk.optional_limits_enabled && s.circuit_breaker.load(Ordering::Relaxed) {
         return Err(ApiError::bad("AI circuit breaker is active"));
     }
     let session = current_session(&s)?;
@@ -497,10 +540,18 @@ async fn ai_run(
         realized_pnl: s.db.lock().realized_pnl().map_err(ApiError::from)?,
         captured_at: Utc::now(),
     };
+    let capital =
+        s.db.lock()
+            .ai_capital(config.risk.ai_budget, Some(balance))
+            .map_err(ApiError::from)?;
+    if capital.principal <= 0.0 {
+        return Err(ApiError::bad("Set AI principal before trading"));
+    }
+    let positions = s.db.lock().ai_positions().map_err(ApiError::from)?;
     let key = s.secrets.read().ai_api_key.clone();
     let provider = AiProvider::new(s.client.clone(), config.ai.clone(), key);
     let (decision, raw) = provider
-        .decide(&companies, &portfolio, input.question.as_deref())
+        .decide(&companies, &portfolio, question.as_deref(), &serde_json::json!({"capital":capital,"positions":positions,"optional_limits":config.risk}))
         .await
         .map_err(ApiError::from)?;
     s.db.lock()
@@ -530,8 +581,33 @@ async fn ai_run(
     let shares = decision
         .shares
         .ok_or_else(|| ApiError::bad("AI decision missing shares"))?;
+    // Re-read spendable cash after the provider request; account balances may have changed.
+    let cash = gateway.balance().await.map_err(ApiError::from)?;
+    let config = s.config_snapshot();
+    let capital =
+        s.db.lock()
+            .ai_capital(config.risk.ai_budget, Some(cash))
+            .map_err(ApiError::from)?;
     let amount = company.latest_price.unwrap_or(0.0) * shares as f64;
-    let budget = risk::budget(&config.risk, portfolio.total_assets, portfolio.balance);
+    let budget = if config.risk.optional_limits_enabled && config.risk.ai_budget_percent > 0.0 {
+        capital
+            .available_cash
+            .min(portfolio.total_assets * config.risk.ai_budget_percent / 100.0)
+    } else {
+        capital.available_cash
+    };
+    if decision.action == TradeAction::Sell
+        && shares
+            > positions
+                .iter()
+                .find(|p| p.company_id == server_company_id)
+                .map(|p| p.shares)
+                .unwrap_or(0)
+    {
+        return Err(ApiError::bad(
+            "AI cannot sell shares outside its own positions",
+        ));
+    }
     if decision.action == TradeAction::Buy && amount > budget {
         let message = format!("AI budget exceeded: amount={amount:.2}, budget={budget:.2}");
         let _ = s.db.lock().audit("risk", "ai", "rejected", &message);
@@ -571,13 +647,21 @@ async fn ai_run(
     } else {
         "sell"
     };
+    if !s.ai_enabled.load(Ordering::Relaxed)
+        || (automated && !s.automation_enabled.load(Ordering::Relaxed))
+    {
+        return Err(ApiError::bad(
+            "AI automation stopped before order submission",
+        ));
+    }
     let message = gateway
         .trade(action, server_company_id, shares)
         .await
         .map_err(ApiError::from)?;
     if action == "buy" {
         s.db.lock()
-            .record_buy(
+            .record_owned_buy(
+                true,
                 server_company_id,
                 &company.name,
                 shares,
@@ -586,13 +670,14 @@ async fn ai_run(
             .map_err(ApiError::from)?
     } else {
         s.db.lock()
-            .record_sell(server_company_id, shares, live.price, false)
+            .record_owned_sell(true, server_company_id, shares, live.price)
             .map_err(ApiError::from)?
     };
     s.db.lock()
         .audit("trade", "ai", "success", &message)
         .map_err(ApiError::from)?;
-    if config.risk.max_daily_loss > 0.0
+    if config.risk.optional_limits_enabled
+        && config.risk.max_daily_loss > 0.0
         && s.db.lock().daily_loss().unwrap_or(0.0) >= config.risk.max_daily_loss
     {
         s.circuit_breaker.store(true, Ordering::Relaxed);
@@ -611,21 +696,32 @@ async fn ai_run(
 async fn ai_pause(State(s): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
     let mut c = s.config_snapshot();
     c.risk.automation_enabled = false;
-    s.automation_enabled.store(false, Ordering::Relaxed);
     c.save(&s.config_file).map_err(ApiError::from)?;
+    s.automation_enabled.store(false, Ordering::Relaxed);
     *s.runtime_config.write() = c;
     Ok(Json(serde_json::json!({"automation_enabled":false})))
 }
 async fn ai_resume(State(s): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
-    if !s.ai_enabled.load(Ordering::Relaxed) {
-        return Err(ApiError::bad("AI is disabled"));
-    }
     let mut c = s.config_snapshot();
+    if s.secrets
+        .read()
+        .ai_api_key
+        .as_ref()
+        .is_none_or(|key| key.trim().is_empty())
+    {
+        return Err(ApiError::bad("Configure AI API key first"));
+    }
+    if c.risk.ai_budget <= 0.0 {
+        return Err(ApiError::bad("Set AI principal first"));
+    }
+    current_session(&s)?;
+    c.ai.enabled = true;
     c.risk.automation_enabled = true;
-    s.circuit_breaker.store(false, Ordering::Relaxed);
-    s.automation_enabled.store(true, Ordering::Relaxed);
     c.save(&s.config_file).map_err(ApiError::from)?;
     *s.runtime_config.write() = c;
+    s.circuit_breaker.store(false, Ordering::Relaxed);
+    s.ai_enabled.store(true, Ordering::Relaxed);
+    s.automation_enabled.store(true, Ordering::Relaxed);
     Ok(Json(serde_json::json!({"automation_enabled":true})))
 }
 
@@ -642,6 +738,11 @@ async fn update_config(
     merge_json(&mut merged, patch);
     let next: crate::config::Config =
         serde_json::from_value(merged).map_err(|e| ApiError::bad(e.to_string()))?;
+    if !next.risk.ai_budget.is_finite() || next.risk.ai_budget < 0.0 {
+        return Err(ApiError::bad(
+            "AI principal must be finite and non-negative",
+        ));
+    }
     next.save(&s.config_file).map_err(ApiError::from)?;
     *s.runtime_config.write() = next.clone();
     s.ai_enabled.store(next.ai.enabled, Ordering::Relaxed);
@@ -918,6 +1019,14 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod config_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stopped_automation_uses_shared_executor_without_http() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::load(root.path()).unwrap();
+        let error = run_automation(state).await.unwrap_err().to_string();
+        assert_eq!(error, "AI automation is stopped");
+    }
 
     #[tokio::test]
     async fn config_save_persists_nested_fields_and_rejects_flat_payloads() {
