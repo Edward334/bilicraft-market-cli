@@ -13,6 +13,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
+ReadWritePaths=/opt/bilicraft-ai-stock/config.toml
 ReadWritePaths=/opt/bilicraft-ai-stock/data
 
 [Install]

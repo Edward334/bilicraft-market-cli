@@ -3,6 +3,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODE="${1:-release}"
 mkdir -p "$ROOT_DIR/data" "$ROOT_DIR/backups" "$ROOT_DIR/target/release"
+if [[ -d "$ROOT_DIR/.git" ]] && [[ -z "$(git -C "$ROOT_DIR" status --porcelain 2>/dev/null || true)" ]]; then
+  git -C "$ROOT_DIR" pull --ff-only origin main
+fi
 if [[ ! -f "$ROOT_DIR/config.toml" ]]; then cp "$ROOT_DIR/config.example.toml" "$ROOT_DIR/config.toml"; fi
 if [[ ! -f "$ROOT_DIR/data/secrets.json" ]]; then printf '{}\n' > "$ROOT_DIR/data/secrets.json"; fi
 chmod 700 "$ROOT_DIR/data" "$ROOT_DIR/backups"

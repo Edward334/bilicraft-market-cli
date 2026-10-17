@@ -16,38 +16,75 @@ Bilicraft AI Stock 是一个面向 Bilicraft Minecraft 虚拟股市的单用户 
 
 ## 快速启动
 
-### 快速部署（推荐）
+### 快速部署（Ubuntu 22.04/24.04，推荐）
 
-Linux x86_64 服务器只需要 `bash`、`curl`、`tar`、`sha256sum` 和网络；不需要在服务器安装 Rust、Cargo 或 Node.js。首次安装会从 GitHub 下载预编译二进制并验证 SHA-256：
-
-```bash
-./scripts/install.sh
-./scripts/login.sh
-./scripts/start.sh
-```
-
-Windows/macOS 开发机可从 GitHub Releases 下载 `bilicraft-ai-stock-linux-x86_64.tar.gz` 上传到服务器，再用 `scripts/install.sh` 自动下载验证。
-
-代码推送到 `main` 后，GitHub Actions 会运行测试并构建滚动 Linux Release。服务器更新只需：
+适用 Linux x86_64。服务器只需 `git`、`curl`、`tar`、`sha256sum`、`systemd` 和网络；Rust/Cargo、Node.js 均由 GitHub Actions 构建，不需要装在服务器。建议部署在 `/opt/bilicraft-ai-stock`，服务默认以 root 运行，以便更新器备份/替换程序及凭据。
 
 ```bash
-./scripts/update.sh
+sudo apt update
+sudo apt install -y git curl ca-certificates tar coreutils
+sudo git clone https://github.com/Edward334/bilicraft-market-cli.git /opt/bilicraft-ai-stock
+cd /opt/bilicraft-ai-stock
 ```
 
-更新脚本先备份数据，校验下载文件，替换二进制并重启正在运行的 systemd 服务；健康检查失败时自动恢复旧二进制。不会覆盖 `config.toml`、数据库或 `data/secrets.json`。若不使用 systemd，请停止服务后运行更新，再执行 `./scripts/start.sh`。
+推送到 `main` 后，[GitHub Actions](https://github.com/Edward334/bilicraft-market-cli/actions) 会测试并生成预编译发布包。**首次部署请先确认 `Linux release` 工作流成功**；完成之前 `latest` 发布包尚不存在，安装脚本会报下载失败，不会安装半成品。
+
+确认发布成功后，在服务器执行：
+
+```bash
+sudo ./scripts/install.sh
+sudo ./scripts/deploy-systemd.sh
+```
+
+`install.sh` 会创建默认配置和私有凭据文件、下载二进制、校验 SHA-256，并创建数据目录。`deploy-systemd.sh` 会按实际仓库路径生成并启用 systemd unit。检查服务：
+
+```bash
+sudo systemctl status bilicraft-ai-stock
+sudo ./scripts/healthcheck.sh
+```
+
+设备码登录需在服务器终端运行：
+
+```bash
+cd /opt/bilicraft-ai-stock
+sudo ./scripts/login.sh
+```
+
+按提示在浏览器完成 Microsoft 登录。需要外网访问时，再配置 Nginx/Caddy 反向代理到 `127.0.0.1:8787`；首次访问 Web UI 必须设置 Web 密码。不要直接把服务绑定到公网地址。
+
+### 后续更新
+
+代码推送到 `main` 并等待 Actions 成功后，服务器只需：
+
+```bash
+cd /opt/bilicraft-ai-stock
+sudo ./scripts/update.sh
+```
+
+脚本会备份配置、数据库和凭据，下载滚动 Release 并校验 SHA-256，替换二进制后重启运行中的 systemd 服务。检查失败会恢复上一个二进制。它不会改写 `config.toml` 或 `data/secrets.json`。更新前检查 `git status --short`；若本地源码有未提交修改，`install.sh` 不会自动 pull。
+
+查看更新与回滚：
+
+```bash
+sudo journalctl -u bilicraft-ai-stock -n 100 --no-pager
+sudo install -m 0755 backups/bilicraft-ai-stock.previous target/release/bilicraft-ai-stock
+sudo systemctl restart bilicraft-ai-stock
+```
+
+不使用 systemd 时，手动停止当前服务，执行 `sudo ./scripts/update.sh`，再用 `sudo ./scripts/start.sh` 启动。服务默认只监听 `127.0.0.1:8787`；推荐用 Nginx/Caddy 终止 HTTPS 并反代到该地址，不要直接暴露应用端口。
 
 ### 从源码构建
 
-如需在服务器本地构建（需要 Rust/Cargo 与 Node.js 18+）：
+仅在没有对应预编译包或要本地调试时需要 Rust/Cargo 与 Node.js 18+：
 
 ```bash
-./scripts/install.sh source
-./scripts/update.sh source
+sudo ./scripts/install.sh source
+sudo ./scripts/update.sh source
 ```
 
-首次进入 Web UI 时需设置访问密码，之后需要登录。
+源码模式只构建和检查程序，不自动重启 systemd；需手动执行 `sudo systemctl restart bilicraft-ai-stock`。
 
-浏览器打开 `http://127.0.0.1:8787`。首次进入 Web UI 时必须设置访问密码；密码以 PBKDF2-SHA256 哈希保存，不写入明文。之后每次访问需要登录，设置页可以修改访问密码。默认 AI 和自动化交易关闭。
+浏览器打开 `http://127.0.0.1:8787`。首次进入 Web UI 时必须设置访问密码；密码以 PBKDF2-SHA256 哈希保存，不写入明文。之后每次访问需要登录，设置页可以修改密码。默认 AI 和自动化交易关闭。
 
 可用命令：
 
