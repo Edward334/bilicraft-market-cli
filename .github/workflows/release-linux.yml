@@ -1,0 +1,52 @@
+name: Linux release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rolling-linux-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Test and build embedded Web UI
+        run: |
+          npm --prefix web ci --ignore-scripts
+          npm --prefix web run build
+          npm --prefix web test
+      - name: Test Rust
+        run: cargo test --locked
+      - name: Build Linux binary
+        run: cargo build --release --locked --target x86_64-unknown-linux-gnu
+      - name: Package
+        run: |
+          mkdir -p release
+          install -m 0755 target/x86_64-unknown-linux-gnu/release/bilicraft-ai-stock release/bilicraft-ai-stock
+          tar -C release -czf bilicraft-ai-stock-linux-x86_64.tar.gz bilicraft-ai-stock
+          sha256sum bilicraft-ai-stock-linux-x86_64.tar.gz > bilicraft-ai-stock-linux-x86_64.tar.gz.sha256
+      - name: Replace rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest \
+            bilicraft-ai-stock-linux-x86_64.tar.gz \
+            bilicraft-ai-stock-linux-x86_64.tar.gz.sha256 \
+            --target "$GITHUB_SHA" \
+            --title "Latest Linux build" \
+            --notes "Automated Linux x86_64 build from main at $GITHUB_SHA. Use scripts/update.sh on the server to install it." \
+            --prerelease

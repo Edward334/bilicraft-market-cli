@@ -16,14 +16,36 @@ Bilicraft AI Stock 是一个面向 Bilicraft Minecraft 虚拟股市的单用户 
 
 ## 快速启动
 
-需要 Rust/Cargo。Web 前端构建需要 Node.js 18+，QQ 扫码绑定也需要 Node.js 18+。
+### 快速部署（推荐）
+
+Linux x86_64 服务器只需要 `bash`、`curl`、`tar`、`sha256sum` 和网络；不需要在服务器安装 Rust、Cargo 或 Node.js。首次安装会从 GitHub 下载预编译二进制并验证 SHA-256：
 
 ```bash
-cp config.example.toml config.toml
 ./scripts/install.sh
 ./scripts/login.sh
 ./scripts/start.sh
 ```
+
+Windows/macOS 开发机可从 GitHub Releases 下载 `bilicraft-ai-stock-linux-x86_64.tar.gz` 上传到服务器，再用 `scripts/install.sh` 自动下载验证。
+
+代码推送到 `main` 后，GitHub Actions 会运行测试并构建滚动 Linux Release。服务器更新只需：
+
+```bash
+./scripts/update.sh
+```
+
+更新脚本先备份数据，校验下载文件，替换二进制并重启正在运行的 systemd 服务；健康检查失败时自动恢复旧二进制。不会覆盖 `config.toml`、数据库或 `data/secrets.json`。若不使用 systemd，请停止服务后运行更新，再执行 `./scripts/start.sh`。
+
+### 从源码构建
+
+如需在服务器本地构建（需要 Rust/Cargo 与 Node.js 18+）：
+
+```bash
+./scripts/install.sh source
+./scripts/update.sh source
+```
+
+首次进入 Web UI 时需设置访问密码，之后需要登录。
 
 浏览器打开 `http://127.0.0.1:8787`。首次进入 Web UI 时必须设置访问密码；密码以 PBKDF2-SHA256 哈希保存，不写入明文。之后每次访问需要登录，设置页可以修改访问密码。默认 AI 和自动化交易关闭。
 
@@ -74,13 +96,14 @@ AI 当前资金 = 累计投入本金 + AI 已实现收益；可继续买入金�
 
 ```bash
 ./scripts/init.sh
-./scripts/install.sh
+./scripts/install.sh             # 下载预编译版
 ./scripts/start.sh
 ./scripts/backup.sh
-./scripts/update.sh
+./scripts/update.sh              # 下载、校验、安装、健康检查、systemd 重启
+./scripts/update.sh source       # 可选：本机重新构建
 ```
 
-`systemd/bilicraft-ai-stock.service.example` 可复制到 systemd。脚本不依赖 Docker；公网部署时只需让反向代理指向本地 Web 端口。备份包含 SQLite、配置和受保护的 `data/secrets.json`，应把备份文件放到受控位置。
+GitHub Actions 在推送到 `main` 后自动构建并更新 `latest` Linux x86_64 Release。`systemd/bilicraft-ai-stock.service.example` 可复制到 systemd。公网部署时让反向代理指向本地 Web 端口。备份包含 SQLite、配置和 `data/secrets.json`，应放在受控位置。要停止自动下载滚动版本，可固定某次 GitHub Release，并通过 `BILICRAFT_RELEASE_BASE` 覆盖下载地址。
 
 ## 开发验证
 
