@@ -16,41 +16,57 @@ Bilicraft AI Stock 是一个面向 Bilicraft Minecraft 虚拟股市的单用户 
 
 ## 快速启动
 
-### 快速部署（Ubuntu 22.04/24.04，推荐）
+### 快速部署（Ubuntu 22.04/24.04，Linux x86_64）
 
-适用 Linux x86_64。服务器只需 `git`、`curl`、`tar`、`sha256sum`、`systemd` 和网络；Rust/Cargo、Node.js 均由 GitHub Actions 构建，不需要装在服务器。建议部署在 `/opt/bilicraft-ai-stock`，服务默认以 root 运行，以便更新器备份/替换程序及凭据。
+服务器不需要 Rust/Cargo 或 Node.js。GitHub Actions 已经生成可用的 [Linux 发布包](https://github.com/Edward334/bilicraft-market-cli/releases/tag/latest)。以下命令请在服务器终端逐行执行；整个安装只需联网下载约 4 MB 二进制。
+
+**1. 克隆仓库并安装程序**
 
 ```bash
 sudo apt update
 sudo apt install -y git curl ca-certificates tar coreutils
 sudo git clone https://github.com/Edward334/bilicraft-market-cli.git /opt/bilicraft-ai-stock
 cd /opt/bilicraft-ai-stock
-```
-
-推送到 `main` 后，[GitHub Actions](https://github.com/Edward334/bilicraft-market-cli/actions) 会测试并生成预编译发布包。**首次部署请先确认 `Linux release` 工作流成功**；完成之前 `latest` 发布包尚不存在，安装脚本会报下载失败，不会安装半成品。
-
-确认发布成功后，在服务器执行：
-
-```bash
 sudo ./scripts/install.sh
-sudo ./scripts/deploy-systemd.sh
 ```
 
-`install.sh` 会创建默认配置和私有凭据文件、下载二进制、校验 SHA-256，并创建数据目录。`deploy-systemd.sh` 会按实际仓库路径生成并启用 systemd unit。检查服务：
+看到 `Installed .../target/release/bilicraft-ai-stock` 表示安装成功。脚本会生成默认配置、创建 `data/secrets.json`，并下载及校验预编译程序；不启动服务，也不会改已有配置或数据库。
+
+**2. 登录 Minecraft**
 
 ```bash
-sudo systemctl status bilicraft-ai-stock
-sudo ./scripts/healthcheck.sh
-```
-
-设备码登录需在服务器终端运行：
-
-```bash
-cd /opt/bilicraft-ai-stock
 sudo ./scripts/login.sh
 ```
 
-按提示在浏览器完成 Microsoft 登录。需要外网访问时，再配置 Nginx/Caddy 反向代理到 `127.0.0.1:8787`；首次访问 Web UI 必须设置 Web 密码。不要直接把服务绑定到公网地址。
+按终端提示打开微软登录网页、输入设备码并完成登录。看到登录成功后返回终端。必须先完成这一步再启动服务，这样服务启动时能读取到 Minecraft 登录凭据。
+
+**3. 安装并启动 systemd 服务**
+
+```bash
+sudo ./scripts/deploy-systemd.sh
+```
+
+这一步会生成 `/etc/systemd/system/bilicraft-ai-stock.service`，设置开机启动并立即启动服务。确认状态和健康检查：
+
+```bash
+sudo systemctl status bilicraft-ai-stock --no-pager
+sudo ./scripts/healthcheck.sh
+```
+
+**4. 首次打开 Web UI**
+
+服务器本机访问 `http://127.0.0.1:8787`。远程访问前，先配置 Nginx/Caddy，将 HTTPS 请求反代到 `127.0.0.1:8787`；不要将应用端口直接暴露到公网。首次打开 Web UI 必须先设置访问密码。AI 默认关闭，需要在设置页配置 AI 接口后再到 AI 页面手动启动。
+
+**以后更新**
+
+代码推送到 `main` 后，等待 [GitHub Actions](https://github.com/Edward334/bilicraft-market-cli/actions) 的 `Linux release` 运行成功。服务器执行：
+
+```bash
+cd /opt/bilicraft-ai-stock
+sudo ./scripts/update.sh
+```
+
+更新会先创建备份，再下载、验证 SHA-256、替换二进制并重启服务；`config.toml`、`data/` 和登录凭据不会被覆盖。
 
 ### 后续更新
 
