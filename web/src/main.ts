@@ -222,13 +222,20 @@ async function renderAi() {
   const token = state.renderToken;
   setPageLoading('正在读取 AI 资金…');
   try {
-    const [config, capital, status] = await Promise.all([api.config(), api.aiCapital(), api.status()]);
+    const [config, capital, status, audit] = await Promise.all([api.config(), api.aiCapital(), api.status(), api.audit()]);
     if (token !== state.renderToken || state.page !== 'ai') return;
     state.config = config; state.status = status;
     const page = surface('AI 自动交易', status.automation_enabled ? '运行中 · 自动检查行情并决定买卖' : '已停止 · 点击开始后才会定时运行');
+    const blockers: string[] = [];
+    if (!status.minecraft_connected) blockers.push('Minecraft 未连接');
+    if (!status.ai_enabled) blockers.push('AI 接口未启用');
+    if (Number(objectValue(config.risk as Json, ['ai_budget'])) <= 0) blockers.push('AI 本金未设置');
     const metrics = el('div', 'metric-grid');
     append(metrics, metric('AI 当前资金', money(capital.total_capital), '投入本金 + 已实现收益'), metric('AI 已实现收益', money(capital.realized_pnl), '卖出后自动复投', tone(capital.realized_pnl)), metric('可继续买入', money(capital.available_cash), `持仓占用 ${money(capital.invested_cost)} · ${capital.cash_verified ? '已核对账户现金' : '未连接，现金待核对'}`));
     page.append(metrics);
+    const readiness = el('div', `notice ${blockers.length ? 'error' : ''}`);
+    append(readiness, icon(blockers.length ? 'error_outline' : 'info'), el('span', '', blockers.length ? `当前不能自动下单：${blockers.join('、')}` : '运行条件已满足：AI 可以请求模型，自动化开关决定是否定时运行。'));
+    page.append(readiness);
     const form = el('div', 'settings-form');
     const principal = field('投入本金', objectValue(config.risk as Json, ['ai_budget']), 'number');
     const frequency = field('检查间隔（分钟）', String(Number((config.ai as Json).automation_interval_seconds || 900) / 60), 'number');
@@ -244,6 +251,10 @@ async function renderAi() {
     append(actions, action('保存资金设置', 'md-outlined-button', save), action('开始自动交易', 'md-filled-button', async () => { await save(); await api.request('/api/ai/resume', { method: 'POST' }); toast('AI 自动交易已开始', 'success'); }), action('停止', 'md-outlined-button', async () => { await api.request('/api/ai/pause', { method: 'POST' }); toast('AI 自动交易已停止', 'success'); }), action('运行一次（可能下单）', 'md-text-button', async () => { await save(); await api.saveConfig({ ai: { enabled: true } }); const result = await api.request<Json>('/api/ai/run', { method: 'POST', body: '{}' }); toast(`运行完成：${text(result.status)}`, 'success'); }));
     append(form, principal, frequency, actions);
     page.append(form, el('p', 'muted', status.minecraft_connected ? 'Minecraft 已连接。停止会阻止后续自动运行，已发送给服务器的交易仍会完成。' : 'Minecraft 未连接，请先在设置页登录并连接。'));
+    const recent = audit.filter((entry) => ['ai_decision', 'ai_cycle', 'risk', 'trade'].includes(String(entry.kind))).slice(0, 6);
+    const diagnostics = surface('最近 AI 活动', recent.length ? '最近一次调用、决策、风控和执行结果' : '还没有 AI 活动记录');
+    if (recent.length) { const list = el('div', 'audit-list'); recent.forEach((entry) => { const item = el('article', 'audit-item'); const top = el('div', 'audit-top'); append(top, el('strong', '', text(entry.kind, '事件')), el('span', `audit-status ${entry.status === 'success' ? 'success' : entry.status === 'rejected' || entry.status === 'failed' ? 'error' : ''}`, text(entry.status)), el('time', 'muted', time(entry.created_at))); append(item, top, el('p', '', entry.message), el('span', 'muted', `来源：${text(entry.source)}`)); list.append(item); }); diagnostics.append(list); } else diagnostics.append(empty('AI 尚未运行', '请先配置 API Key、连接 Minecraft、设置投入本金，再点击“运行一次”或“开始自动交易”。'));
+    page.append(diagnostics);
     const question = field('给 AI 的问题（运行一次，可能下单）');
     const ask = surface('策略问答');
     append(ask, question, action('提交并运行一次', 'md-outlined-button', async () => { await save(); await api.saveConfig({ ai: { enabled: true } }); await api.request('/api/ai/run', { method: 'POST', body: JSON.stringify({ question: inputValue(question) }) }); toast('运行完成', 'success'); }));
