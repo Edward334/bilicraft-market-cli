@@ -348,8 +348,9 @@ async fn run_session(
     )
     .await;
     if let Err(error) = result {
-        tracing::error!(error=?error, "Minecraft session actor stopped");
-        let _ = error_state.send(Some(error.to_string()));
+        let detail = format!("{error:#}");
+        tracing::error!(error=%detail, "Minecraft session actor stopped");
+        let _ = error_state.send(Some(detail));
         let current = *state.borrow();
         let terminal = if current == ConnectionState::Connected {
             ConnectionState::Disconnected
@@ -387,9 +388,12 @@ async fn session_inner(
                 Some(SessionCommand::SendCommand(command)) => {
                     if phase == Phase::Play { transport.write_packet(stream, &encode_command(palette, &command)?).await?; }
                 }
-                Some(SessionCommand::Disconnect) | None => {
+                Some(SessionCommand::Disconnect) => {
                     let _ = state.send(ConnectionState::Disconnected);
                     return Ok(());
+                }
+                None => {
+                    bail!("Minecraft command channel closed")
                 }
             }
         }

@@ -966,6 +966,7 @@ async fn connect(State(s): State<AppState>) -> Result<Json<serde_json::Value>, A
     let error_state = s.minecraft_error.clone();
     *error_state.write() = None;
     let events = s.events.clone();
+    let session_slot = s.minecraft.clone();
     let mut rx = session.state.clone();
     let mut error_rx = session.error.clone();
     *s.minecraft_state.write() = *rx.borrow();
@@ -977,7 +978,18 @@ async fn connect(State(s): State<AppState>) -> Result<Json<serde_json::Value>, A
                     let now = *rx.borrow();
                     *state.write() = now;
                     if matches!(now, ConnectionState::Disconnected | ConnectionState::Failed) {
-                        *error_state.write() = Some(format!("Minecraft session ended in {now:?}"));
+                        let detail = error_rx
+                            .borrow()
+                            .clone()
+                            .unwrap_or_else(|| format!("Minecraft session ended in {now:?}"));
+                        *error_state.write() = Some(detail.clone());
+                        *session_slot.write() = None;
+                        let _ = events.send(AppEvent {
+                            kind: "error".into(),
+                            message: format!("Minecraft session stopped: {detail}"),
+                            at: Utc::now(),
+                            data: serde_json::json!({"state":format!("{now:?}"),"error":detail}),
+                        });
                     }
                     let _ = events.send(AppEvent {
                         kind: "minecraft".into(),
@@ -1027,10 +1039,14 @@ fn enrich_holding_ids(
 }
 
 fn current_session(s: &AppState) -> Result<SessionHandle, ApiError> {
-    s.minecraft
-        .read()
-        .clone()
-        .ok_or_else(|| ApiError::bad("Minecraft is not connected"))
+    s.minecraft.read().clone().ok_or_else(|| {
+        ApiError::bad(
+            s.minecraft_error
+                .read()
+                .clone()
+                .unwrap_or_else(|| "Minecraft is not connected".into()),
+        )
+    })
 }
 
 async fn events(
